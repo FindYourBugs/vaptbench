@@ -11,14 +11,15 @@
 # Groups: web network ad crack  (core is always installed)
 set -uo pipefail
 
-GROUPS="${GROUPS:-${*:-all}}"
-[ "$GROUPS" = "all" ] && GROUPS="web network ad crack"
+# NB: do NOT name this GROUPS — that is a reserved bash variable (group IDs).
+PKGS="${PKGS:-${*:-all}}"
+[ "$PKGS" = "all" ] && PKGS="web network ad crack"
 
 c_y='\033[1;33m'; c_g='\033[1;32m'; c_r='\033[1;31m'; c_0='\033[0m'
 say(){ printf "\n${c_y}==> %s${c_0}\n" "$*"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
-want(){ case " $GROUPS " in *" $1 "*) return 0;; *) return 1;; esac; }
+want(){ case " $PKGS " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 # ---- apt packages ---------------------------------------------------------
 APT_CORE="python3 python3-venv python3-pip git curl wget jq golang-go"
@@ -74,17 +75,34 @@ grep -q 'VAPT_WORDLIST' "$RC" 2>/dev/null || echo 'export VAPT_WORDLIST=/usr/sha
 
 # ---- Python venv for the app ---------------------------------------------
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-say "python venv + requirements ($APP_DIR)"
 cd "$APP_DIR"
-[ -d .venv ] || python3 -m venv .venv
-./.venv/bin/pip install -q --upgrade pip
-./.venv/bin/pip install -q -r requirements.txt && printf "   ${c_g}python deps installed${c_0}\n"
+
+# Prefer a stable interpreter (3.14 often lacks wheels for playwright/greenlet).
+PY=python3
+for cand in python3.13 python3.12 python3.11 python3; do
+  have "$cand" && { PY="$cand"; break; }
+done
+say "python venv + requirements ($APP_DIR, using $PY)"
+
+# Rebuild the venv if missing or broken (e.g. its interpreter was upgraded away).
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import sys" 2>/dev/null; then
+  rm -rf .venv
+  "$PY" -m venv .venv || { printf "   ${c_r}venv creation failed — is $PY-venv installed?${c_0}\n"; }
+fi
+VPY="$APP_DIR/.venv/bin/python"
+"$VPY" -m pip install -q --upgrade pip
+"$VPY" -m pip install -q -r requirements.txt && printf "   ${c_g}python deps installed${c_0}\n" \
+  || printf "   ${c_r}pip install failed${c_0}\n"
 
 # Headless browser for autonomous login on JS/SPA apps (Playwright + Chromium).
 say "installing headless browser (Chromium via Playwright)"
-sudo ./.venv/bin/python -m playwright install-deps chromium || \
-  printf "   ${c_r}playwright system deps failed (install manually if browser login errors)${c_0}\n"
-./.venv/bin/python -m playwright install chromium && printf "   ${c_g}chromium installed${c_0}\n"
+if "$VPY" -c "import playwright" 2>/dev/null; then
+  sudo "$VPY" -m playwright install-deps chromium || \
+    printf "   ${c_r}playwright system deps failed (install manually if browser login errors)${c_0}\n"
+  "$VPY" -m playwright install chromium && printf "   ${c_g}chromium installed${c_0}\n"
+else
+  printf "   ${c_r}playwright not installed (pip step failed) — browser login disabled${c_0}\n"
+fi
 
 # ---- verification table ---------------------------------------------------
 say "verification"

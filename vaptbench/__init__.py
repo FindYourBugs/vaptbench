@@ -5,8 +5,32 @@ hunt-* skills. SQLite store by default.
 """
 import os
 from flask import Flask
+from sqlalchemy import inspect, text
 
 from .models import db
+
+
+def _auto_migrate():
+    """Add any model columns missing from existing tables (SQLite ADD COLUMN).
+
+    create_all() creates new tables but never alters existing ones, so as the
+    schema grows this back-fills new columns instead of forcing a DB wipe.
+    """
+    insp = inspect(db.engine)
+    for table in db.metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            continue
+        existing = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            coltype = col.type.compile(db.engine.dialect)
+            try:
+                db.session.execute(
+                    text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {coltype}'))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
 
 
 def create_app():
@@ -29,5 +53,6 @@ def create_app():
 
     with app.app_context():
         db.create_all()
+        _auto_migrate()
 
     return app

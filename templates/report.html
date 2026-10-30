@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Report — {{ e.name }}{% endblock %}
+{% block body %}
+<div class="wrap">
+  <h1>VAPT Report — {{ e.name }}</h1>
+  <p class="muted">{{ e.client }} · <a href="{{ url_for('findings.report_md', eid=e.id) }}">download .md</a></p>
+  {% for f in findings %}
+    <article class="rfinding sev-{{ f.severity }}">
+      <h2>[{{ f.severity.upper() }}] {{ f.title }}</h2>
+      <p><b>Class:</b> {{ f.vuln_class }} &nbsp; <b>CVSS:</b> {{ f.cvss or '—' }} &nbsp; <b>Status:</b> {{ f.status }}</p>
+      <p>{{ f.description }}</p>
+      {% if f.steps %}<h4>Steps</h4><pre>{{ f.steps }}</pre>{% endif %}
+      {% if f.poc_request %}<h4>PoC — Request</h4><pre>{{ f.poc_request }}</pre>{% endif %}
+      {% if f.poc_response %}<h4>PoC — Response</h4><pre>{{ f.poc_response }}</pre>{% endif %}
+    </article>
+  {% else %}<p class="muted">No findings recorded.</p>{% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="wrap">
+  <h1>{{ e.name }}</h1>
+  <p class="muted">{{ e.client }}</p>
+  {% if e.authorization %}<div class="auth">Authorization: {{ e.authorization }}</div>{% endif %}
+
+  <div class="cols">
+    <section>
+      <h2>Targets</h2>
+      {% for t in e.targets %}
+        <a class="card" href="{{ url_for('web_workbench.workbench', tid=t.id) }}">
+          <h3>{{ t.base_url }}</h3>
+          <small>{{ t.identities|length }} role(s)</small>
+        </a>
+      {% else %}<p class="muted">No targets yet.</p>{% endfor %}
+
+      <h3>Add web target</h3>
+      <form method="post" action="{{ url_for('engagements.new_target', eid=e.id) }}" class="box">
+        <input name="base_url" placeholder="https://app.example.com" required>
+        <textarea name="scope_rules" placeholder="Scope rules, one per line. Deny wins.&#10;app.example.com&#10;!admin.example.com"></textarea>
+        <button>Add target &amp; open workbench</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Findings</h2>
+      {% for f in e.findings %}
+        <div class="finding sev-{{ f.severity }}">
+          <strong>[{{ f.severity.upper() }}]</strong> {{ f.title }}
+          <small>{{ f.vuln_class }}</small>
+        </div>
+      {% else %}<p class="muted">No findings yet.</p>{% endfor %}
+      <p><a class="btn" href="{{ url_for('findings.report', eid=e.id) }}">View report</a>
+         <a class="btn" href="{{ url_for('findings.report_md', eid=e.id) }}">Export .md</a></p>
+    </section>
+  </div>
+</div>
+{% endblock %}

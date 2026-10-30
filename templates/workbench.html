@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Workbench — {{ t.base_url }}{% endblock %}
+{% block body %}
+<div class="wrap wide" data-tid="{{ t.id }}">
+  <h1>{{ t.base_url }}</h1>
+
+  <div class="cols3">
+    <!-- LEFT: roles + playbooks -->
+    <aside>
+      <h2>Identities (roles)</h2>
+      {% if t.identities %}<button id="loginall" class="full">Log in as all roles</button>{% endif %}
+      {% for i in t.identities %}
+        <div class="ident">
+          <div>
+            <strong>{{ i.role }}</strong> <small>{{ i.username }} ({{ i.auth_type }})</small>
+            <div class="lstat" id="lstat-{{ i.id }}">{{ i.login_status or 'not logged in' }}</div>
+          </div>
+          <div class="identbtns">
+            <button class="mini login-one" data-iid="{{ i.id }}">login</button>
+            <form method="post" action="{{ url_for('engagements.delete_identity', iid=i.id) }}" class="inline">
+              <button class="x">×</button>
+            </form>
+          </div>
+        </div>
+      {% else %}<p class="muted">Add at least one role.</p>{% endfor %}
+
+      <details>
+        <summary>+ add role</summary>
+        <form method="post" action="{{ url_for('engagements.new_identity', tid=t.id) }}" class="box">
+          <input name="role" placeholder="role (admin, userA...)" required>
+          <input name="username" placeholder="username / email">
+          <input name="secret" placeholder="password / token">
+          <select name="auth_type">
+            <option value="form">form login</option>
+            <option value="bearer">bearer token</option>
+            <option value="basic">basic</option>
+            <option value="cookie">cookie</option>
+          </select>
+          <input name="login_url" placeholder="login URL (for form)">
+          <textarea name="login_config" placeholder='form-login config (JSON, optional)&#10;{"username_field":"email","password_field":"password","csrf_field":"_token","success_contains":"Logout"}'></textarea>
+          <button>Add role</button>
+        </form>
+      </details>
+      <p class="muted small">bearer: secret = token · cookie: secret = "k=v; k2=v2" · form: set login URL + config</p>
+
+      <h2>Playbooks</h2>
+      <p class="muted">{{ playbooks|length }} web methodologies from your skills</p>
+      <ul class="pb">
+        {% for p in playbooks %}
+          <li><a href="#" class="pb-open" data-slug="{{ p.slug }}" title="{{ p.description }}">{{ p.name }}</a></li>
+        {% endfor %}
+      </ul>
+    </aside>
+
+    <!-- MIDDLE: recon + repeater -->
+    <section>
+      <h2>Recon</h2>
+      <div class="tools">
+        {% for tool in tools %}
+          <button class="tool-run {{ 'off' if not tool.installed else '' }}"
+                  data-tool="{{ tool.name }}" {{ 'disabled' if not tool.installed }}
+                  title="{{ tool.note }}{{ ' — NOT INSTALLED' if not tool.installed }}">
+            {{ tool.name }}
+          </button>
+        {% endfor %}
+      </div>
+      <pre id="recon-out" class="resp">Pick a recon tool. Crawl/history tools auto-import discovered URLs into Captured requests.</pre>
+
+      <h2>Repeater</h2>
+      <div class="rep">
+        <div class="repline">
+          <select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option></select>
+          <input id="url" placeholder="{{ t.base_url }}/api/..." value="{{ t.base_url }}/">
+          <select id="identity">
+            <option value="">— no session —</option>
+            {% for i in t.identities %}<option value="{{ i.id }}">as {{ i.role }}</option>{% endfor %}
+          </select>
+          <button id="sendbtn">Send</button>
+        </div>
+        <textarea id="headers" placeholder="Headers, one per line&#10;Content-Type: application/json"></textarea>
+        <textarea id="body" placeholder="Request body"></textarea>
+      </div>
+      <h3>Response</h3>
+      <pre id="resp" class="resp">—</pre>
+    </section>
+
+    <!-- RIGHT: playbook panel + AI + access matrix -->
+    <aside>
+      <h2>Playbook</h2>
+      <div id="pbpanel" class="panel">Pick a playbook to load its methodology.</div>
+
+      <h2>AI next step</h2>
+      {% if ai_ok %}
+        <button id="aibtn">Suggest next manual step</button>
+        <div id="aiout" class="panel"></div>
+      {% else %}
+        <p class="muted">Local model offline. Start Ollama to enable.</p>
+      {% endif %}
+
+      <h2>Captured requests</h2>
+      <ul class="reqs">
+        {% for r in reqs %}
+          <li><a href="#" class="matrix-open" data-rid="{{ r.id }}">{{ r.method }} {{ r.url[:40] }}</a>
+              <small>{{ r.status }}</small></li>
+        {% endfor %}
+      </ul>
+      <div id="matrix" class="panel"></div>
+    </aside>
+  </div>
+</div>
+{% endblock %}

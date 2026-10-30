@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="wrap">
+  <div class="aistat {{ 'ok' if ai_ok else 'bad' }}">
+    AI brain: {{ 'online' if ai_ok else 'offline' }} — {{ ai_msg }}
+  </div>
+
+  <h1>Engagements</h1>
+  <div class="grid">
+    {% for e in engagements %}
+      <a class="card" href="{{ url_for('engagements.view_engagement', eid=e.id) }}">
+        <h3>{{ e.name }}</h3>
+        <p>{{ e.client or 'no client' }}</p>
+        <small>{{ e.targets|length }} target(s) · {{ e.findings|length }} finding(s)</small>
+      </a>
+    {% else %}
+      <p class="muted">No engagements yet. Create one to start.</p>
+    {% endfor %}
+  </div>
+
+  <h2>New engagement</h2>
+  <form method="post" action="{{ url_for('engagements.new_engagement') }}" class="box">
+    <input name="name" placeholder="Engagement name" required>
+    <input name="client" placeholder="Client">
+    <textarea name="authorization" placeholder="Authorization / rules of engagement (who approved this, scope window)"></textarea>
+    <button>Create engagement</button>
+  </form>
+</div>
+{% endblock %}

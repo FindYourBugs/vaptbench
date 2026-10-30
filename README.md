@@ -69,11 +69,21 @@ cross-role **access-control matrix** flagging possible broken access / IDOR as
 needs-review. Every finding is `confirmed` (passed a verifier) or `needs-review`
 (flagged, not proven) — never a blind AI guess.
 
-Phase 2 (next): AI-crafted injection (stored/DOM XSS, blind SQLi, SSTI, LFI,
-SSRF w/ OOB, JWT, GraphQL…) + AI finding write-ups.
+**Tier-2 classes verified now (Phase 2):** blind/time-based SQLi (measured,
+double-checked delay), OS command injection (timing), SSTI (computed arithmetic
+reflected), LFI/path traversal (/etc/passwd + win.ini signature), NoSQLi (engine
+error), GraphQL introspection, and JWT weak-secret (HS256 cracked locally).
+
+**AI layer:** when the model is online it (a) suggests extra payloads — which
+only count if they still trip a deterministic signal — and (b) writes up each
+confirmed finding, grounded in the matching `hunt-*` skill. The AI never
+confirms a bug on its own.
+
+Phase 3 (next): stored/DOM XSS, SSRF with OOB collaborator, business-logic &
+chaining, then the network/AD/API/red-team modules.
 
 ## Status
-v0.3. Working: engagements/targets, multi-role store, scope guard, automated
+v0.4. Working: engagements/targets, multi-role store, scope guard, automated
 login, recon runners, **autonomous engine + Start VAPT + live run feed**,
 Tier-1 verifiers, access-control matrix, repeater, playbook loader, AI-suggest,
 findings + report export.

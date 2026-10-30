@@ -18,6 +18,12 @@ from .http_client import send as http_send
 from .auth import login as do_login
 from .recon import run_tool
 from . import verifiers as V
+from . import verifiers2 as V2
+from . import ai_tester
+from . import ai as ai_mod
+from .skills import load_playbook
+
+MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 
 MAX_ENDPOINTS = 40
 LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\'#?\s][^"\']*)["\']', re.I)
@@ -169,10 +175,18 @@ def _run(app, run_id):
                         _log(run, "warn", "test", f"{fn.__name__} error on {url}: {e}")
                 db.session.commit()
 
+            # --- Phase 3b: injection (Tier-2 deterministic + AI-assisted) ---
+            if not run.stop_requested:
+                _inject_phase(run, send, t, endpoints, identities, seen)
+
             # --- Phase 4: access-control matrix ----------------------------
             if len(identities) >= 1 and not run.stop_requested:
                 _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
                 _access_control(run, send, endpoints, identities, seen)
+
+            # --- Phase 5: AI finding write-ups (best-effort) ---------------
+            if not run.stop_requested:
+                _writeup_phase(run)
 
             run.status = "stopped" if run.stop_requested else "done"
             run.phase = "done"
@@ -185,6 +199,107 @@ def _run(app, run_id):
             run = Run.query.get(run_id)
             run.status = "error"; run.finished = datetime.utcnow()
             db.session.add(RunLog(run_id=run.id, level="error", phase="error", message=str(e)))
+            db.session.commit()
+
+
+def _collect_tokens(identities):
+    """Pull candidate JWT strings from identities' sessions/secrets."""
+    import json as _json
+    toks = []
+    for i in identities:
+        if i.secret:
+            toks.append(i.secret)
+        if i.session_blob:
+            try:
+                blob = _json.loads(i.session_blob)
+                toks += list((blob.get("cookies") or {}).values())
+                toks += [v for v in (blob.get("headers") or {}).values()]
+            except Exception:
+                pass
+    return toks
+
+
+def _inject_phase(run, send, t, endpoints, identities, seen):
+    """Tier-2: time-based SQLi/cmd-injection, SSTI, LFI, NoSQLi, GraphQL, JWT."""
+    ai_ok, _ = ai_mod.available()
+    _log(run, "info", "inject",
+         "Injection testing (Tier-2 deterministic%s)..." % (" + AI payloads" if ai_ok else ""))
+
+    # Token-level + target-level checks (cheap, run once).
+    for f in V2.check_jwt(_collect_tokens(identities)):
+        _add_finding(run, seen, f)
+    for f in V2.check_graphql(send, t.base_url, endpoints):
+        _add_finding(run, seen, f)
+
+    param_eps = [u for u in endpoints if urlparse(u).query][:MAX_INJECT_ENDPOINTS]
+    skill_cache = {}
+    for i, url in enumerate(param_eps, 1):
+        if run.stop_requested:
+            _log(run, "warn", "inject", "stop requested — halting"); break
+        _log(run, "test", "inject", f"[{i}/{len(param_eps)}] injecting {url}")
+        checks = (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
+                  V2.check_time_sqli, V2.check_cmd_injection)
+        hit_classes = set()
+        for fn in checks:
+            try:
+                for f in fn(send, url):
+                    hit_classes.add(f["vuln_class"])
+                    _add_finding(run, seen, f)
+            except Exception as e:
+                _log(run, "warn", "inject", f"{fn.__name__} error: {e}")
+
+        # AI payload augmentation for signal-based classes it may have missed.
+        if ai_ok:
+            _ai_augment(run, send, url, seen, hit_classes, skill_cache)
+        db.session.commit()
+
+
+def _ai_augment(run, send, url, seen, hit_classes, skill_cache):
+    """Try AI-suggested payloads; a result counts only if a deterministic
+    signal still trips (so the AI widens coverage, verifiers keep truth)."""
+    from .verifiers2 import _set_param, _params, PASSWD_RE
+    _, q = _params(url)
+    signals = {
+        "hunt-ssti": lambda b: "vss5767" in b,                     # 73*79
+        "hunt-lfi": lambda b: bool(PASSWD_RE.search(b)) or "[extensions]" in b.lower(),
+    }
+    for vclass, sig in signals.items():
+        if vclass in hit_classes:
+            continue
+        if vclass not in skill_cache:
+            pb = load_playbook(vclass)
+            skill_cache[vclass] = pb["body"] if pb else ""
+        payloads = ai_tester.extra_payloads(vclass, skill_cache[vclass])
+        for key in list(q)[:2]:
+            for p in payloads:
+                r = send("GET", _set_param(url, key, p))
+                if r.get("ok") and sig(r.get("text") or ""):
+                    _add_finding(run, seen, dict(
+                        title=f"{vclass.replace('hunt-','').upper()} via '{key}' (AI payload)",
+                        vuln_class=vclass, severity="high", cvss="", confidence="confirmed",
+                        description=f"An AI-suggested payload for {vclass} tripped the deterministic signal on '{key}'. Payload: {p}",
+                        steps=f"GET {_set_param(url, key, p)}",
+                        poc_request=f"GET {_set_param(url, key, p)}",
+                        poc_response=(r.get("text") or "")[:800]))
+                    break
+
+
+def _writeup_phase(run):
+    """Improve confirmed findings' prose with the AI, grounded in the skill."""
+    if not ai_mod.available()[0]:
+        return
+    _log(run, "info", "report", "AI writing up confirmed findings...")
+    cache = {}
+    for fn in Finding.query.filter_by(run_id=run.id, confidence="confirmed").all():
+        if fn.vuln_class not in cache:
+            pb = load_playbook(fn.vuln_class)
+            cache[fn.vuln_class] = pb["body"] if pb else ""
+        upd = ai_tester.writeup({
+            "title": fn.title, "vuln_class": fn.vuln_class, "severity": fn.severity,
+            "description": fn.description, "poc_response": fn.poc_response,
+        }, cache[fn.vuln_class])
+        if upd.get("description"):
+            fn.description = upd["description"]
             db.session.commit()
 
 

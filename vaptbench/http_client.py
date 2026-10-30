@@ -54,6 +54,7 @@ def send(method, url, scope_rules, headers=None, body=None, identity=None, timeo
         "len": len(text),
         "headers": dict(resp.headers),
         "text": text[:20000],
+        "elapsed": resp.elapsed.total_seconds(),   # for timing-based checks
         "identity": identity.role if identity else "(none)",
     }
 

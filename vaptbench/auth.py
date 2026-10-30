@@ -143,6 +143,11 @@ def login(identity, scope_rules):
     """Perform login for one identity. Returns (ok, message). Scope-guarded."""
     at = identity.auth_type
 
+    # 'auto' = drive a headless browser (works on classic + JS/SPA apps).
+    if at == "auto":
+        from . import browser_login
+        return browser_login.login(identity, scope_rules)
+
     # Token / basic / pasted-cookie: no network login needed.
     if at == "bearer":
         identity.session_blob = _capture(requests.Session(),
@@ -211,11 +216,15 @@ def login(identity, scope_rules):
     except requests.RequestException as e:
         return False, f"request error: {e}"
 
-    # No password field on the page => almost certainly a JS/SPA/API login.
+    # No password field in static HTML => JS/SPA login. Escalate to the
+    # headless browser automatically if it's available.
     if not had_pw_field:
-        return False, ("no password field on the login page — looks like a "
-                       "JavaScript/API login. Tell me the login API endpoint, or use "
-                       "auth_type=cookie/bearer with a token grabbed from the browser.")
+        from . import browser_login
+        if browser_login.available():
+            return browser_login.login(identity, scope_rules)
+        return False, ("JavaScript/SPA login detected and the headless browser isn't "
+                       "installed. Run scripts/setup_kali.sh to enable automatic login, "
+                       "or use auth_type=curl with a session from the browser.")
 
     body = r.text
     gained = sorted(set(sess.cookies.keys()) - pre_cookies)

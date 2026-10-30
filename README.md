@@ -39,7 +39,15 @@ export VAPT_CLOUD_MODEL=claude-opus-4-8
 ## Skills location
 Defaults to `~/.claude/skills`. Override with `VAPT_SKILLS_DIR`.
 
-## Automated login
+## Autonomous login (client-grade)
+Pick **username + password** (auth_type `auto`): a headless Chromium logs in
+for you, including on **JavaScript / SPA apps** where there's no server-side
+form — it renders the page, finds the fields, submits, and captures the
+cookies + bearer token. Just set the login page URL + creds. Installed by
+`scripts/setup_kali.sh` (Playwright + Chromium). Falls back to the methods
+below if the browser isn't available.
+
+## Automated login (other methods)
 Per identity, `login`/`Log in as all roles` captures the session into the
 identity so the Repeater and matrix replay as that role:
 - **bearer** — `secret` = token → `Authorization: Bearer ...`

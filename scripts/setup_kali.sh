@@ -80,6 +80,12 @@ cd "$APP_DIR"
 ./.venv/bin/pip install -q --upgrade pip
 ./.venv/bin/pip install -q -r requirements.txt && printf "   ${c_g}python deps installed${c_0}\n"
 
+# Headless browser for autonomous login on JS/SPA apps (Playwright + Chromium).
+say "installing headless browser (Chromium via Playwright)"
+sudo ./.venv/bin/python -m playwright install-deps chromium || \
+  printf "   ${c_r}playwright system deps failed (install manually if browser login errors)${c_0}\n"
+./.venv/bin/python -m playwright install chromium && printf "   ${c_g}chromium installed${c_0}\n"
+
 # ---- verification table ---------------------------------------------------
 say "verification"
 CHECK="python3 nmap nuclei ffuf katana whatweb httpx gau waybackurls subfinder \

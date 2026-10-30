@@ -4,6 +4,16 @@
 <div class="wrap wide" data-tid="{{ t.id }}">
   <h1>{{ t.base_url }}</h1>
 
+  <div class="startbar">
+    <form method="post" action="{{ url_for('web_workbench.start_vapt', tid=t.id) }}">
+      <button class="start">▶ Start VAPT</button>
+    </form>
+    <span class="startnote">Autonomous: logs in as every role, maps the app, tests &amp; verifies, writes findings. Add your roles below first.</span>
+    {% if t.runs %}
+      <a class="btn" href="{{ url_for('web_workbench.run_view', rid=t.runs[-1].id) }}">last run →</a>
+    {% endif %}
+  </div>
+
   <div class="cols3">
     <!-- LEFT: roles + playbooks -->
     <aside>

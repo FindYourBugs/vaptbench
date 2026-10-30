@@ -1,7 +1,8 @@
 """The web workbench: playbooks, repeater, and the access-control matrix."""
-from flask import Blueprint, render_template, request, jsonify
+from flask import Blueprint, render_template, request, jsonify, redirect, url_for, current_app
 
-from ..models import db, Target, Identity, RequestLog, ReconRun
+from ..models import db, Target, Identity, RequestLog, ReconRun, Run, RunLog, Finding
+from .. import engine
 from ..skills import list_web_playbooks, load_playbook
 from ..http_client import send, access_matrix
 from ..scope import in_scope
@@ -21,6 +22,47 @@ def workbench(tid):
     ai_ok, _ = ai_available()
     return render_template("workbench.html", t=t, playbooks=playbooks,
                            reqs=reqs, runs=runs, tools=available_tools(), ai_ok=ai_ok)
+
+
+@bp.route("/target/<int:tid>/start", methods=["POST"])
+def start_vapt(tid):
+    """Launch an autonomous VAPT run against this target."""
+    t = Target.query.get_or_404(tid)
+    app = current_app._get_current_object()
+    rid = engine.start_run(app, tid)
+    return redirect(url_for("web_workbench.run_view", rid=rid))
+
+
+@bp.route("/run/<int:rid>")
+def run_view(rid):
+    run = Run.query.get_or_404(rid)
+    return render_template("run.html", run=run, t=run.target)
+
+
+@bp.route("/run/<int:rid>/feed")
+def run_feed(rid):
+    """Live feed polled by the run page: new logs + current findings + stats."""
+    run = Run.query.get_or_404(rid)
+    after = request.args.get("after", 0, type=int)
+    logs = (RunLog.query.filter(RunLog.run_id == rid, RunLog.id > after)
+            .order_by(RunLog.id).all())
+    findings = Finding.query.filter_by(run_id=rid).order_by(Finding.id.desc()).all()
+    return jsonify({
+        "status": run.status, "phase": run.phase,
+        "stats": {"endpoints": run.endpoints_tested, "requests": run.requests_sent,
+                  "findings": run.findings_count},
+        "logs": [{"id": l.id, "level": l.level, "phase": l.phase,
+                  "message": l.message,
+                  "ts": l.ts.strftime("%H:%M:%S") if l.ts else ""} for l in logs],
+        "findings": [{"id": f.id, "title": f.title, "severity": f.severity,
+                      "vuln_class": f.vuln_class, "confidence": f.confidence}
+                     for f in findings],
+    })
+
+
+@bp.route("/run/<int:rid>/stop", methods=["POST"])
+def run_stop(rid):
+    return jsonify({"stopped": engine.request_stop(rid)})
 
 
 @bp.route("/identity/<int:iid>/login", methods=["POST"])

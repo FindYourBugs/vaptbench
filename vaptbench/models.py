@@ -87,14 +87,47 @@ class ReconRun(db.Model):
     target = db.relationship("Target", backref="recon_runs")
 
 
+class Run(db.Model):
+    """One autonomous VAPT run against a target."""
+    __tablename__ = "runs"
+    id = db.Column(db.Integer, primary_key=True)
+    target_id = db.Column(db.Integer, db.ForeignKey("targets.id"))
+    engagement_id = db.Column(db.Integer, db.ForeignKey("engagements.id"))
+    status = db.Column(db.String(20), default="queued")   # queued|running|done|error|stopped
+    phase = db.Column(db.String(40), default="")
+    stop_requested = db.Column(db.Boolean, default=False)
+    endpoints_tested = db.Column(db.Integer, default=0)
+    requests_sent = db.Column(db.Integer, default=0)
+    findings_count = db.Column(db.Integer, default=0)
+    started = db.Column(db.DateTime, default=datetime.utcnow)
+    finished = db.Column(db.DateTime)
+
+    target = db.relationship("Target", backref="runs")
+    logs = db.relationship("RunLog", backref="run", cascade="all, delete-orphan")
+
+
+class RunLog(db.Model):
+    """A line in the live run feed."""
+    __tablename__ = "run_logs"
+    id = db.Column(db.Integer, primary_key=True)
+    run_id = db.Column(db.Integer, db.ForeignKey("runs.id"))
+    ts = db.Column(db.DateTime, default=datetime.utcnow)
+    level = db.Column(db.String(10), default="info")   # info|test|hit|warn|error
+    phase = db.Column(db.String(40), default="")
+    message = db.Column(db.Text, default="")
+
+
 class Finding(db.Model):
     __tablename__ = "findings"
     id = db.Column(db.Integer, primary_key=True)
     engagement_id = db.Column(db.Integer, db.ForeignKey("engagements.id"))
+    run_id = db.Column(db.Integer, db.ForeignKey("runs.id"))
     title = db.Column(db.String(300), nullable=False)
     vuln_class = db.Column(db.String(80))       # maps to a hunt-* skill
     severity = db.Column(db.String(20), default="info")
     cvss = db.Column(db.String(60), default="")
+    # confirmed = passed a deterministic verifier; needs-review = AI-only suspicion
+    confidence = db.Column(db.String(20), default="confirmed")
     status = db.Column(db.String(20), default="open")   # open | confirmed | reported
     description = db.Column(db.Text, default="")
     steps = db.Column(db.Text, default="")      # reproduction steps

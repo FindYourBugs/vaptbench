@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}VAPT run #{{ run.id }}{% endblock %}
+{% block body %}
+<div class="wrap wide" data-rid="{{ run.id }}">
+  <h1>Autonomous VAPT — {{ t.base_url }}</h1>
+  <div class="runhead">
+    <span id="status" class="pill">{{ run.status }}</span>
+    <span class="muted">phase: <b id="phase">{{ run.phase }}</b></span>
+    <span class="muted">endpoints: <b id="s-ep">0</b></span>
+    <span class="muted">requests: <b id="s-req">0</b></span>
+    <span class="muted">findings: <b id="s-find">0</b></span>
+    <button id="stopbtn" class="x2">■ Stop</button>
+    <a class="btn" href="{{ url_for('findings.report', eid=run.engagement_id) }}">report</a>
+  </div>
+
+  <div class="cols-run">
+    <section>
+      <h2>Live feed</h2>
+      <div id="feed" class="feed"></div>
+    </section>
+    <aside>
+      <h2>Findings</h2>
+      <div id="findings" class="findlist"><p class="muted">none yet</p></div>
+    </aside>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  const rid = document.querySelector("[data-rid]").dataset.rid;
+  const feed = document.getElementById("feed");
+  let after = 0, done = false;
+
+  function sevColor(s){return {critical:"#f85149",high:"#ff7b33",medium:"#d29922",low:"#58a6ff",info:"#8b949e"}[s]||"#8b949e";}
+
+  async function tick() {
+    let d;
+    try { d = await (await fetch(`/run/${rid}/feed?after=${after}`)).json(); }
+    catch (e) { return; }
+    document.getElementById("status").textContent = d.status;
+    document.getElementById("status").className = "pill " + d.status;
+    document.getElementById("phase").textContent = d.phase;
+    document.getElementById("s-ep").textContent = d.stats.endpoints;
+    document.getElementById("s-req").textContent = d.stats.requests;
+    document.getElementById("s-find").textContent = d.stats.findings;
+
+    d.logs.forEach((l) => {
+      after = Math.max(after, l.id);
+      const row = document.createElement("div");
+      row.className = "fl fl-" + l.level;
+      row.innerHTML = `<span class="t">${l.ts}</span> <span class="ph">${l.phase}</span> ${l.message.replace(/</g,"&lt;")}`;
+      feed.appendChild(row);
+    });
+    if (d.logs.length) feed.scrollTop = feed.scrollHeight;
+
+    if (d.findings.length) {
+      const box = document.getElementById("findings");
+      box.innerHTML = d.findings.map((f) =>
+        `<div class="fcard" style="border-left-color:${sevColor(f.severity)}">
+           <b>[${f.severity.toUpperCase()}]</b> ${f.title.replace(/</g,"&lt;")}
+           <div class="fmeta">${f.vuln_class} · <span class="${f.confidence}">${f.confidence}</span></div>
+         </div>`).join("");
+    }
+
+    if (["done","error","stopped"].includes(d.status)) { done = true; }
+    if (!done) setTimeout(tick, 1500);
+  }
+  tick();
+
+  document.getElementById("stopbtn").onclick = async () => {
+    await fetch(`/run/${rid}/stop`, { method: "POST" });
+    document.getElementById("stopbtn").textContent = "stopping…";
+  };
+})();
+</script>
+{% endblock %}

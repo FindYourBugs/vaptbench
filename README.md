@@ -55,12 +55,28 @@ discovered URLs as captured requests for the matrix: `httpx`, `whatweb`,
 `katana`, `gau`, `waybackurls`, `ffuf` (set `VAPT_WORDLIST`), `nuclei`.
 Missing binaries are reported cleanly, not fatal.
 
+## Autonomous engine (Start VAPT)
+Click **Start VAPT** on a target and the engine runs the whole web VAPT in the
+background — authenticate every role → recon/map → test & verify → access
+control → findings — with a **live feed** you watch (`/run/<id>`). Phase 1 is
+fully deterministic (works even with the AI offline); correctness comes from
+`verifiers.py`, which only emits a finding when it can *prove* it.
+
+**Tier-1 classes verified now:** missing security headers, cookie flags,
+clickjacking, CORS misconfig, dangerous HTTP methods, open redirect, reflected
+XSS (unencoded breakout), error-based SQLi, exposed sensitive files. Plus a
+cross-role **access-control matrix** flagging possible broken access / IDOR as
+needs-review. Every finding is `confirmed` (passed a verifier) or `needs-review`
+(flagged, not proven) — never a blind AI guess.
+
+Phase 2 (next): AI-crafted injection (stored/DOM XSS, blind SQLi, SSTI, LFI,
+SSRF w/ OOB, JWT, GraphQL…) + AI finding write-ups.
+
 ## Status
-v0.2. Working: engagements/targets, multi-role store, scope guard, **automated
-login (bearer/basic/cookie/form)**, **recon runners (7 tools)**, repeater,
-access-matrix, playbook loader, AI-suggest, findings + report export.
-Next: per-playbook checklist UI with progress, PoC screenshots, background
-long-running recon, then network/AD/API/red-team modules.
+v0.3. Working: engagements/targets, multi-role store, scope guard, automated
+login, recon runners, **autonomous engine + Start VAPT + live run feed**,
+Tier-1 verifiers, access-control matrix, repeater, playbook loader, AI-suggest,
+findings + report export.
 
 ## Authorization
 Only run against targets you are authorized to test. Each engagement records an

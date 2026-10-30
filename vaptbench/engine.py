@@ -1,0 +1,221 @@
+"""Autonomous VAPT engine (Phase 1).
+
+Given a target, runs the whole methodology in a background thread:
+  authenticate -> recon/map -> test (Tier-1 deterministic) -> access-control
+  -> record findings. Correctness comes from verifiers.py; the engine is the
+  orchestration + live feed. AI-crafted injection (Tier 2) plugs in later.
+
+Phase 1 is fully deterministic and does NOT require the AI backend, so it runs
+even while Ollama is being wired up.
+"""
+import re
+import threading
+from datetime import datetime
+from urllib.parse import urljoin, urlparse
+
+from .models import db, Target, Identity, RequestLog, Run, RunLog, Finding
+from .http_client import send as http_send
+from .auth import login as do_login
+from .recon import run_tool
+from . import verifiers as V
+
+MAX_ENDPOINTS = 40
+LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\'#?\s][^"\']*)["\']', re.I)
+
+
+# --------------------------------------------------------------------------
+def start_run(app, target_id):
+    """Create a Run and launch it in the background. Returns the Run id."""
+    t = Target.query.get(target_id)
+    run = Run(target_id=target_id, engagement_id=t.engagement_id,
+              status="queued", phase="queued")
+    db.session.add(run)
+    db.session.commit()
+    rid = run.id
+    threading.Thread(target=_run, args=(app, rid), daemon=True).start()
+    return rid
+
+
+def request_stop(run_id):
+    run = Run.query.get(run_id)
+    if run and run.status == "running":
+        run.stop_requested = True
+        db.session.commit()
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------
+def _log(run, level, phase, message):
+    db.session.add(RunLog(run_id=run.id, level=level, phase=phase, message=message))
+    run.phase = phase
+    db.session.commit()
+
+
+def _add_finding(run, seen, f):
+    key = (f["vuln_class"], f["title"])
+    if key in seen:
+        return
+    seen.add(key)
+    fn = Finding(engagement_id=run.engagement_id, run_id=run.id,
+                 title=f["title"], vuln_class=f["vuln_class"],
+                 severity=f["severity"], cvss=f.get("cvss", ""),
+                 confidence=f.get("confidence", "confirmed"),
+                 status="confirmed" if f.get("confidence") == "confirmed" else "open",
+                 description=f.get("description", ""), steps=f.get("steps", ""),
+                 poc_request=f.get("poc_request", ""), poc_response=f.get("poc_response", ""))
+    db.session.add(fn)
+    run.findings_count = (run.findings_count or 0) + 1
+    mark = "✓" if f.get("confidence") == "confirmed" else "?"
+    _log(run, "hit", run.phase,
+         f"{mark} [{f['severity'].upper()}] {f['title']} ({f.get('confidence')})")
+
+
+def _same_origin(a, b):
+    return urlparse(a).hostname == urlparse(b).hostname
+
+
+def _discover(base_url, base_html, scope_rules, run):
+    """Build an endpoint list: links in the base page + katana crawl + known reqs."""
+    found = {base_url}
+    for m in LINK_RE.findall(base_html or ""):
+        u = urljoin(base_url, m)
+        if u.startswith("http") and _same_origin(u, base_url):
+            found.add(u.split("#")[0])
+
+    # Light katana crawl if available (depth 1); non-fatal if missing.
+    res = run_tool("katana", base_url, scope_rules)
+    if res.get("status") == "done":
+        for u in res.get("urls", [])[:200]:
+            if _same_origin(u, base_url):
+                found.add(u.split("#")[0])
+        _log(run, "info", "recon", f"katana crawl added endpoints (total {len(found)})")
+    else:
+        _log(run, "info", "recon", f"katana unavailable ({res.get('status')}); using in-page links")
+
+    # Include anything already captured for this target.
+    for r in RequestLog.query.filter_by(target_id=run.target_id).all():
+        if _same_origin(r.url, base_url):
+            found.add(r.url.split("#")[0])
+
+    # Prefer parameterised URLs (more testable), then cap.
+    ordered = sorted(found, key=lambda u: (0 if urlparse(u).query else 1, len(u)))
+    return ordered[:MAX_ENDPOINTS]
+
+
+def _run(app, run_id):
+    with app.app_context():
+        run = Run.query.get(run_id)
+        run.status = "running"
+        db.session.commit()
+        try:
+            t = Target.query.get(run.target_id)
+            identities = Identity.query.filter_by(target_id=t.id).all()
+            scope = t.scope_rules
+            seen = set()
+
+            def send(method, url, headers="", body="", identity=None):
+                r = http_send(method, url, scope, headers=headers, body=body, identity=identity)
+                run.requests_sent = (run.requests_sent or 0) + 1
+                return r
+
+            _log(run, "info", "start", f"Autonomous VAPT on {t.base_url} — {len(identities)} identity(ies)")
+
+            # --- Phase 1: authenticate -------------------------------------
+            _log(run, "info", "auth", "Logging in identities...")
+            primary = None
+            for ident in identities:
+                ok, msg = do_login(ident, scope)
+                ident.login_status = ("ok: " if ok else "fail: ") + msg
+                db.session.commit()
+                _log(run, "info" if ok else "warn", "auth", f"{ident.role}: {msg}")
+                if ok and primary is None:
+                    primary = ident
+
+            # --- Phase 2: recon / map --------------------------------------
+            _log(run, "info", "recon", "Mapping attack surface...")
+            base = send("GET", t.base_url, identity=primary)
+            if not base.get("ok"):
+                _log(run, "error", "recon", f"base unreachable: {base.get('reason')}")
+                run.status = "error"; run.finished = datetime.utcnow(); db.session.commit()
+                return
+            endpoints = _discover(t.base_url, base.get("text", ""), scope, run)
+            _log(run, "info", "recon", f"{len(endpoints)} endpoint(s) in scope to test")
+
+            # Passive checks on the base response.
+            for f in (V.check_headers(t.base_url, base) + V.check_cookies(t.base_url, base)
+                      + V.check_clickjacking(t.base_url, base)):
+                _add_finding(run, seen, f)
+            for f in V.check_exposed_files(send, t.base_url):
+                _add_finding(run, seen, f)
+
+            # --- Phase 3: test & exploit (Tier-1) --------------------------
+            _log(run, "info", "test", "Testing endpoints (Tier-1 deterministic classes)...")
+            for i, url in enumerate(endpoints, 1):
+                if run.stop_requested:
+                    _log(run, "warn", "test", "stop requested — halting"); break
+                run.endpoints_tested = i
+                _log(run, "test", "test", f"[{i}/{len(endpoints)}] {url}")
+                g = send("GET", url, identity=primary)
+                if g.get("ok"):
+                    for f in V.check_clickjacking(url, g):
+                        _add_finding(run, seen, f)
+                for fn in (V.check_cors, V.check_methods, V.check_open_redirect,
+                           V.check_reflected_xss, V.check_error_sqli):
+                    try:
+                        for f in fn(send, url):
+                            _add_finding(run, seen, f)
+                    except Exception as e:  # one check failing must not kill the run
+                        _log(run, "warn", "test", f"{fn.__name__} error on {url}: {e}")
+                db.session.commit()
+
+            # --- Phase 4: access-control matrix ----------------------------
+            if len(identities) >= 1 and not run.stop_requested:
+                _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
+                _access_control(run, send, endpoints, identities, seen)
+
+            run.status = "stopped" if run.stop_requested else "done"
+            run.phase = "done"
+            run.finished = datetime.utcnow()
+            db.session.commit()
+            _log(run, "info", "done",
+                 f"Run {run.status}: {run.findings_count} finding(s), "
+                 f"{run.endpoints_tested} endpoint(s), {run.requests_sent} request(s)")
+        except Exception as e:
+            run = Run.query.get(run_id)
+            run.status = "error"; run.finished = datetime.utcnow()
+            db.session.add(RunLog(run_id=run.id, level="error", phase="error", message=str(e)))
+            db.session.commit()
+
+
+def _access_control(run, send, endpoints, identities, seen):
+    """Replay each endpoint as every role + unauthenticated, flag anomalies.
+
+    Deterministic signal: an unauthenticated request getting 200 with a body
+    comparable to an authenticated one on a non-root endpoint = possible broken
+    access control. Marked needs-review (ownership can't be proven headless).
+    """
+    roles = [(i.role, i) for i in identities] + [("unauth", None)]
+    for url in endpoints[:20]:
+        if run.stop_requested:
+            break
+        if urlparse(url).path in ("", "/"):
+            continue
+        results = {}
+        for role, ident in roles:
+            r = send("GET", url, identity=ident)
+            results[role] = (r.get("status"), r.get("len")) if r.get("ok") else (None, None)
+        unauth = results.get("unauth")
+        authed = [v for k, v in results.items() if k != "unauth" and v[0] == 200]
+        if unauth and unauth[0] == 200 and authed:
+            # unauth sees a 200 that an authed role also sees -> maybe no authz
+            matrix = ", ".join(f"{k}={v[0]}/{v[1]}" for k, v in results.items())
+            _add_finding(run, seen, dict(
+                title=f"Possible broken access control: {urlparse(url).path}",
+                vuln_class="hunt-idor", severity="medium", cvss="",
+                confidence="needs-review",
+                description=f"{url} returns 200 to an UNAUTHENTICATED request as well as to "
+                            f"authenticated roles. Verify whether it should require auth / "
+                            f"whether it exposes another user's data.\nMatrix: {matrix}",
+                steps=f"GET {url} with and without a session; compare.",
+                poc_request=f"GET {url}", poc_response=f"role matrix: {matrix}"))

@@ -43,7 +43,10 @@ def _parse_inputs(html):
     """Return a list of {name,type,value} for every <input> in the page."""
     inputs = []
     for tag in re.findall(r"<input\b[^>]*>", html or "", re.I):
-        attrs = dict(re.findall(r'(\w+)\s*=\s*["\']([^"\']*)["\']', tag))
+        attrs = {}
+        for k, dq, sq, uq in re.findall(
+                r'([\w-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))', tag):
+            attrs[k.lower()] = dq or sq or uq
         if attrs.get("name"):
             inputs.append({"name": attrs["name"],
                            "type": (attrs.get("type") or "text").lower(),
@@ -134,8 +137,10 @@ def login(identity, scope_rules):
         # Prime: fetch the login page for cookies + CSRF token, and auto-detect
         # the form field names so most forms work without any login_config.
         r0 = sess.get(url, timeout=20, verify=False)
+        had_pw_field = any(i["type"] == "password" for i in _parse_inputs(r0.text))
         cfg = _autodetect(r0.text, cfg)
         token = _grab_csrf(r0.text, cfg["csrf_field"])
+        pre_cookies = set(sess.cookies.keys())
 
         data = dict(cfg.get("_hidden") or {})          # carry hidden fields
         data[cfg["username_field"]] = identity.username
@@ -148,20 +153,40 @@ def login(identity, scope_rules):
     except requests.RequestException as e:
         return False, f"request error: {e}"
 
-    # Decide success.
+    # No password field on the page => almost certainly a JS/SPA/API login.
+    if not had_pw_field:
+        return False, ("no password field on the login page — looks like a "
+                       "JavaScript/API login. Tell me the login API endpoint, or use "
+                       "auth_type=cookie/bearer with a token grabbed from the browser.")
+
     body = r.text
-    if cfg["failure_contains"] and cfg["failure_contains"] in body:
-        return False, f"failure marker seen ({cfg['failure_contains']!r})"
+    gained = sorted(set(sess.cookies.keys()) - pre_cookies)
+    redirected = bool(r.history) or r.url.rstrip("/") != url.rstrip("/")
+    form_still = ('type="password"' in body.lower()) or ("type='password'" in body.lower())
+    low = body.lower()
+    fail_hit = (cfg["failure_contains"] and cfg["failure_contains"] in body) or \
+               any(w in low for w in ("invalid", "incorrect", "try again",
+                                      "failed", "wrong password", "denied"))
+
+    # Decide success, most explicit signal first.
     if cfg["success_contains"]:
-        if cfg["success_contains"] not in body:
-            return False, f"success marker not found ({cfg['success_contains']!r})"
-        good = True
+        good = cfg["success_contains"] in body
+    elif gained and not form_still:
+        good = True                       # got a session cookie, login form gone
+    elif redirected and not form_still and not fail_hit:
+        good = True                       # bounced off the login page cleanly
     else:
-        # No marker given: treat gained cookies or a non-login redirect as success.
-        good = bool(sess.cookies.get_dict()) or r.url != url
+        good = False
+
+    diag = (f"[HTTP {r.status_code}, redirected={redirected}, "
+            f"new-cookies={gained or 'none'}, login-form-still-shown={form_still}, "
+            f"fields used: user='{cfg['username_field']}' pw='{cfg['password_field']}'"
+            f"{', failure-text seen' if fail_hit else ''}]")
 
     if not good:
-        return False, "no session cookie gained; set success_contains to confirm"
+        hint = ("login looks rejected (check creds/fields)" if form_still or fail_hit
+                else "couldn't confirm; set success_contains to a logged-in-only string")
+        return False, f"{hint} {diag}"
 
     identity.session_blob = _capture(sess)
     n = len(sess.cookies.get_dict())

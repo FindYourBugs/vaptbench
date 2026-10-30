@@ -79,11 +79,23 @@ only count if they still trip a deterministic signal — and (b) writes up each
 confirmed finding, grounded in the matching `hunt-*` skill. The AI never
 confirms a bug on its own.
 
-Phase 3 (next): stored/DOM XSS, SSRF with OOB collaborator, business-logic &
-chaining, then the network/AD/API/red-team modules.
+**Tier-3 / advanced (Phase 3):** SSRF proven via a built-in **OOB collaborator**
+(the target actually calls back to `/oob/<token>` — set `VAPT_OOB_HOST` to an
+address the target can reach), **stored XSS** proven two-step (payload surfaces
+unencoded on a *different* page), DOM-XSS candidates (source→sink, needs-review),
+and **attack-chain correlation** that ties confirmed findings into realistic
+escalation paths (SSRF→metadata, forged-JWT→ATO, injection→RCE, XSS→session
+theft), narrated by the AI when online.
+
+Next: the network / AD / API / red-team modules.
+
+## OOB listener
+Built in. The target's callbacks hit `/oob/<token>` on this app. For internet
+targets, set `VAPT_OOB_HOST` to a public host that forwards here; for local labs
+the default `127.0.0.1:8090` works.
 
 ## Status
-v0.4. Working: engagements/targets, multi-role store, scope guard, automated
+v0.5. Working: engagements/targets, multi-role store, scope guard, automated
 login, recon runners, **autonomous engine + Start VAPT + live run feed**,
 Tier-1 verifiers, access-control matrix, repeater, playbook loader, AI-suggest,
 findings + report export.

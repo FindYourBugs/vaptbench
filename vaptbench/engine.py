@@ -8,22 +8,28 @@ Given a target, runs the whole methodology in a background thread:
 Phase 1 is fully deterministic and does NOT require the AI backend, so it runs
 even while Ollama is being wired up.
 """
+import os
 import re
+import time
+import uuid
 import threading
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
-from .models import db, Target, Identity, RequestLog, Run, RunLog, Finding
+from .models import db, Target, Identity, RequestLog, Run, RunLog, Finding, OobHit
 from .http_client import send as http_send
 from .auth import login as do_login
 from .recon import run_tool
 from . import verifiers as V
 from . import verifiers2 as V2
+from . import verifiers3 as V3
 from . import ai_tester
 from . import ai as ai_mod
 from .skills import load_playbook
 
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
+MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
+OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
 
 MAX_ENDPOINTS = 40
 LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\'#?\s][^"\']*)["\']', re.I)
@@ -179,6 +185,10 @@ def _run(app, run_id):
             if not run.stop_requested:
                 _inject_phase(run, send, t, endpoints, identities, seen)
 
+            # --- Phase 3c: advanced (SSRF/OOB, stored XSS, DOM) ------------
+            if not run.stop_requested:
+                _advanced_phase(run, send, t, endpoints, seen)
+
             # --- Phase 4: access-control matrix ----------------------------
             if len(identities) >= 1 and not run.stop_requested:
                 _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
@@ -187,6 +197,10 @@ def _run(app, run_id):
             # --- Phase 5: AI finding write-ups (best-effort) ---------------
             if not run.stop_requested:
                 _writeup_phase(run)
+
+            # --- Phase 6: chain correlated findings ------------------------
+            if not run.stop_requested:
+                _chain_phase(run, seen)
 
             run.status = "stopped" if run.stop_requested else "done"
             run.phase = "done"
@@ -282,6 +296,94 @@ def _ai_augment(run, send, url, seen, hit_classes, skill_cache):
                         poc_request=f"GET {_set_param(url, key, p)}",
                         poc_response=(r.get("text") or "")[:800]))
                     break
+
+
+def _advanced_phase(run, send, t, endpoints, seen):
+    """SSRF (OOB-confirmed), stored XSS (two-step), DOM-XSS candidates."""
+    _log(run, "info", "advanced", f"Advanced tests (SSRF via OOB host {OOB_HOST}, stored/DOM XSS)...")
+
+    def make_callback(tag):
+        token = f"{tag}{uuid.uuid4().hex[:12]}"
+        return token, f"http://{OOB_HOST}/oob/{token}"
+
+    def was_hit(token):
+        for _ in range(6):                       # poll ~3s for a callback
+            if OobHit.query.filter_by(token=token).first():
+                return True
+            time.sleep(0.5)
+        return False
+
+    param_eps = [u for u in endpoints if urlparse(u).query][:MAX_ADV_ENDPOINTS]
+    for url in param_eps:
+        if run.stop_requested:
+            break
+        try:
+            for f in V3.check_ssrf(send, url, make_callback, was_hit):
+                _add_finding(run, seen, f)
+            for f in V3.check_stored_xss(send, url, endpoints[:MAX_ADV_ENDPOINTS]):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "advanced", f"error on {url}: {e}")
+        db.session.commit()
+
+    for url in endpoints[:MAX_ADV_ENDPOINTS]:
+        if run.stop_requested:
+            break
+        try:
+            for f in V3.check_dom_xss(send, url):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "advanced", f"dom error on {url}: {e}")
+    db.session.commit()
+
+
+# Rule-based escalation chains: any confirmed finding of a listed class makes
+# the chain apply. The chain is surfaced as a high needs-review note that ties
+# the member findings together and explains the realistic escalation.
+CHAIN_RULES = [
+    ({"hunt-ssti", "hunt-rce"}, "Injection → Remote Code Execution",
+     "Template/command injection gives code execution on the server — full host compromise."),
+    ({"hunt-jwt-crypto"}, "Forged JWT → account & privilege takeover",
+     "The HS256 secret is crackable, so tokens can be forged for any user or role (admin ATO)."),
+    ({"hunt-ssrf"}, "SSRF → internal services / cloud metadata",
+     "The SSRF can target 169.254.169.254 or internal hosts to steal cloud credentials and pivot."),
+    ({"hunt-sqli"}, "SQLi → database compromise / auth bypass",
+     "The injection allows reading or altering the database and may bypass authentication."),
+    ({"hunt-xss"}, "Stored/Reflected XSS → session & account takeover",
+     "Script execution in victims' sessions enables cookie/session theft and account takeover."),
+    ({"hunt-idor", "hunt-open-redirect"}, "Access-control + redirect → targeted exploitation",
+     "Broken access control combined with an open redirect enables targeted data theft / phishing."),
+]
+
+
+def _chain_phase(run, seen):
+    confirmed = Finding.query.filter_by(run_id=run.id, confidence="confirmed").all()
+    present = {f.vuln_class for f in confirmed}
+    if not present:
+        return
+    _log(run, "info", "chain", "Correlating findings into attack chains...")
+    ai_ok = ai_mod.available()[0]
+    for classes, title, narrative in CHAIN_RULES:
+        members = [f for f in confirmed if f.vuln_class in classes]
+        if not members:
+            continue
+        mtitles = "; ".join(f"[{m.severity}] {m.title}" for m in members)
+        desc = narrative + "\n\nBased on confirmed findings: " + mtitles
+        if ai_ok:
+            try:
+                nr = ai_mod.ask(
+                    f"Confirmed findings: {mtitles}\nExplain, in 3-4 sentences, the realistic "
+                    f"attack chain and business impact. Be factual, no invented details.",
+                    system="You are a penetration tester summarising an exploit chain.")
+                if nr and len(nr) > 40:
+                    desc += "\n\n--- AI chain analysis ---\n" + nr
+            except Exception:
+                pass
+        _add_finding(run, seen, dict(
+            title="Attack chain: " + title, vuln_class="chain", severity="high",
+            cvss="", confidence="needs-review", description=desc,
+            steps="See the member findings referenced above.",
+            poc_request="", poc_response=mtitles))
 
 
 def _writeup_phase(run):

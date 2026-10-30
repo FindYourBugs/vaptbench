@@ -21,9 +21,11 @@ def create_app():
     from .blueprints.engagements import bp as eng_bp
     from .blueprints.web_workbench import bp as web_bp
     from .blueprints.findings import bp as find_bp
+    from .blueprints.oob import bp as oob_bp
     app.register_blueprint(eng_bp)
     app.register_blueprint(web_bp)
     app.register_blueprint(find_bp)
+    app.register_blueprint(oob_bp)
 
     with app.app_context():
         db.create_all()

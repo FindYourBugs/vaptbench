@@ -117,6 +117,17 @@ class RunLog(db.Model):
     message = db.Column(db.Text, default="")
 
 
+class OobHit(db.Model):
+    """A callback received by the built-in OOB listener — proof of SSRF/blind."""
+    __tablename__ = "oob_hits"
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(64), index=True)
+    source_ip = db.Column(db.String(64))
+    method = db.Column(db.String(10))
+    path = db.Column(db.String(500))
+    ts = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class Finding(db.Model):
     __tablename__ = "findings"
     id = db.Column(db.Integer, primary_key=True)

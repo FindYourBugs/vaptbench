@@ -1,8 +1,19 @@
 """The web workbench: playbooks, repeater, and the access-control matrix."""
+from urllib.parse import urlparse
 from flask import Blueprint, render_template, request, jsonify, redirect, url_for, current_app
 
 from ..models import db, Target, Identity, RequestLog, ReconRun, Run, RunLog, Finding
 from .. import engine
+
+
+def _ensure_scope(t):
+    """Blank scope would default-deny everything. The target's own host is
+    implicitly authorised (the user entered it), so seed it automatically."""
+    if not (t.scope_rules or "").strip():
+        host = urlparse(t.base_url).hostname
+        if host:
+            t.scope_rules = host
+            db.session.commit()
 from ..skills import list_web_playbooks, load_playbook
 from ..http_client import send, access_matrix
 from ..scope import in_scope
@@ -28,6 +39,7 @@ def workbench(tid):
 def start_vapt(tid):
     """Launch an autonomous VAPT run against this target."""
     t = Target.query.get_or_404(tid)
+    _ensure_scope(t)
     app = current_app._get_current_object()
     rid = engine.start_run(app, tid)
     return redirect(url_for("web_workbench.run_view", rid=rid))
@@ -70,6 +82,7 @@ def identity_login(iid):
     """Automated login for one identity; captures its session."""
     ident = Identity.query.get_or_404(iid)
     t = Target.query.get(ident.target_id)
+    _ensure_scope(t)
     ok, msg = do_login(ident, t.scope_rules)
     ident.login_status = ("ok: " if ok else "fail: ") + msg
     db.session.commit()
@@ -80,6 +93,7 @@ def identity_login(iid):
 def login_all(tid):
     """Log in as every identity in one go."""
     t = Target.query.get_or_404(tid)
+    _ensure_scope(t)
     results = []
     for ident in t.identities:
         ok, msg = do_login(ident, t.scope_rules)

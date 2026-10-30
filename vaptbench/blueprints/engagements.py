@@ -1,4 +1,5 @@
 """Engagements + targets + identities (the multi-role credential store)."""
+from urllib.parse import urlparse
 from flask import Blueprint, render_template, request, redirect, url_for
 
 from ..models import db, Engagement, Target, Identity
@@ -35,14 +36,26 @@ def view_engagement(eid):
 
 @bp.route("/engagement/<int:eid>/target/new", methods=["POST"])
 def new_target(eid):
-    t = Target(
-        engagement_id=eid,
-        base_url=request.form["base_url"].rstrip("/"),
-        scope_rules=request.form.get("scope_rules", ""),
-    )
+    base = request.form["base_url"].rstrip("/")
+    scope = request.form.get("scope_rules", "").strip()
+    if not scope:                     # default-deny would block everything; seed from host
+        host = urlparse(base).hostname
+        if host:
+            scope = host
+    t = Target(engagement_id=eid, base_url=base, scope_rules=scope)
     db.session.add(t)
     db.session.commit()
     return redirect(url_for("web_workbench.workbench", tid=t.id))
+
+
+@bp.route("/target/<int:tid>/scope", methods=["POST"])
+def update_scope(tid):
+    t = Target.query.get_or_404(tid)
+    t.scope_rules = request.form.get("scope_rules", "").strip()
+    if "base_url" in request.form and request.form["base_url"].strip():
+        t.base_url = request.form["base_url"].strip().rstrip("/")
+    db.session.commit()
+    return redirect(url_for("web_workbench.workbench", tid=tid))
 
 
 @bp.route("/target/<int:tid>/identity/new", methods=["POST"])

@@ -3,7 +3,17 @@
 {% block body %}
 <div class="wrap wide" data-tid="{{ t.id }}">
   <h1>{{ t.base_url }}</h1>
-  <p class="muted small">scope: {{ t.scope_rules.splitlines()|join(' · ') or '(none set)' }}</p>
+  <p class="muted small">scope: {{ t.scope_rules.splitlines()|join(' · ') or '⚠ none set — runs will be blocked' }}</p>
+  <details class="addrole">
+    <summary>edit target / scope</summary>
+    <form method="post" action="{{ url_for('engagements.update_scope', tid=t.id) }}" class="box">
+      <label>Base URL (use the site root, e.g. https://shop.example.com)</label>
+      <input name="base_url" value="{{ t.base_url }}">
+      <label>Scope rules — one per line, deny wins (prefix ! to exclude)</label>
+      <textarea name="scope_rules" placeholder="shop.example.com">{{ t.scope_rules }}</textarea>
+      <button>Save</button>
+    </form>
+  </details>
 
   <!-- STEP 1: roles -->
   <h2>1 · Identities / roles</h2>

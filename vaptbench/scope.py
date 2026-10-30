@@ -32,12 +32,14 @@ def parse_rules(text):
 def _matches(rule, url):
     host = _host(url)
     rhost = _host(rule)
-    # Host or subdomain match
-    if host == rhost or host.endswith("." + rhost):
-        if "/" not in rule and "*" not in rule:
-            return True
-    # Glob match on the full URL
-    return fnmatch.fnmatch(url, rule) or fnmatch.fnmatch(host, rule)
+    # A rule containing a glob is matched strictly (lets you scope precise paths
+    # or write path-level deny rules like !https://x.com/admin/*).
+    if "*" in rule:
+        return fnmatch.fnmatch(url, rule) or fnmatch.fnmatch(host, rule)
+    # Otherwise a plain host OR a full URL authorises the whole host (and its
+    # subdomains) — so "shop.x.com", "https://shop.x.com", and
+    # "https://shop.x.com/login" all mean the same thing: the shop.x.com site.
+    return bool(rhost) and (host == rhost or host.endswith("." + rhost))
 
 
 def in_scope(url, rules_text):

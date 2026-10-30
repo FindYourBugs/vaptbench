@@ -42,16 +42,17 @@
       <input name="username" placeholder="username / email">
       <input name="secret" placeholder="password / token / cookie string">
       <select name="auth_type">
+        <option value="curl">paste cURL / headers (SPA / JS apps)</option>
         <option value="form">form login</option>
         <option value="bearer">bearer token</option>
         <option value="basic">basic</option>
         <option value="cookie">cookie</option>
       </select>
-      <input name="login_url" placeholder="login URL (for form login)">
-      <textarea name="login_config" placeholder='form-login config (JSON, optional)&#10;{"username_field":"email","password_field":"password","csrf_field":"_token","success_contains":"Logout"}'></textarea>
+      <input name="login_url" placeholder="login URL (form login only)">
+      <textarea name="login_config" placeholder='paste cURL here (for "paste cURL" type) — OR form-login JSON config&#10;{"username_field":"email","password_field":"password","success_contains":"Logout"}'></textarea>
       <button>Add role</button>
     </form>
-    <p class="muted small">bearer: secret = token · cookie: secret = "k=v; k2=v2" · form: set login URL + config</p>
+    <p class="muted small">SPA/JS app → <b>paste cURL</b>: in Chrome DevTools → Network → right-click an authenticated request → Copy as cURL → paste above. · bearer: secret = token · cookie: secret = "k=v; k2=v2" · form: set login URL</p>
   </details>
 
   <!-- STEP 2: run it -->

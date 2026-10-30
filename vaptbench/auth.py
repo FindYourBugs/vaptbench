@@ -29,6 +29,46 @@ DEFAULTS = {
 }
 
 
+def parse_curl(text):
+    """Extract cookies + headers from a pasted cURL command or raw header block.
+
+    Handles -H/--header '...', -b/--cookie '...', and plain 'Name: value' lines.
+    Lets SPA/API logins be captured straight from the browser's DevTools
+    ('Copy as cURL') with no automated login at all.
+    """
+    cookies, headers = {}, {}
+    text = (text or "").replace("\\\n", " ").replace("^\n", " ")
+
+    def _add_cookie_str(s):
+        for part in s.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                cookies[k.strip()] = v.strip()
+
+    # -H / --header '...'  and  -b / --cookie '...'
+    for m in re.finditer(r"(-H|--header|-b|--cookie)\s+(['\"])(.*?)\2", text):
+        flag, content = m.group(1), m.group(3)
+        if flag in ("-b", "--cookie"):
+            _add_cookie_str(content)
+        elif ":" in content:
+            name, value = content.split(":", 1)
+            if name.strip().lower() == "cookie":
+                _add_cookie_str(value)
+            else:
+                headers[name.strip()] = value.strip()
+
+    # Fallback: raw header lines pasted without curl flags.
+    if not cookies and not headers:
+        for line in text.splitlines():
+            if ":" in line and not line.strip().startswith("curl"):
+                name, value = line.split(":", 1)
+                if name.strip().lower() == "cookie":
+                    _add_cookie_str(value)
+                else:
+                    headers[name.strip()] = value.strip()
+    return cookies, headers
+
+
 def _config(identity):
     cfg = dict(DEFAULTS)
     if identity.login_config:
@@ -122,6 +162,24 @@ def login(identity, scope_rules):
                 jar[k.strip()] = v.strip()
         identity.session_blob = json.dumps({"cookies": jar, "headers": {}})
         return True, f"{len(jar)} cookie(s) stored"
+    if at == "curl":
+        # login_config holds a pasted cURL command / header block from DevTools.
+        cookies, headers = parse_curl(identity.login_config or identity.secret or "")
+        # Drop headers that must be recomputed per request or would break replay.
+        _drop = {"host", "content-length", "accept-encoding", "connection",
+                 "content-type", ":authority", ":method", ":path", ":scheme"}
+        headers = {k: v for k, v in headers.items() if k.lower() not in _drop}
+        if not cookies and not headers:
+            return False, "no cookies/headers found in the pasted cURL/headers"
+        identity.session_blob = json.dumps({"cookies": cookies, "headers": headers})
+        bits = []
+        if cookies:
+            bits.append(f"{len(cookies)} cookie(s)")
+        if any(h.lower() == "authorization" for h in headers):
+            bits.append("auth token")
+        if headers:
+            bits.append(f"{len(headers)} header(s)")
+        return True, "session captured: " + ", ".join(bits)
 
     # Form login.
     url = identity.login_url

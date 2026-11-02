@@ -60,7 +60,8 @@ Give it an IP or range and it runs a full network assessment — not just a port
 scan:
 ```bash
 python vapt.py 10.0.0.5 --mode network --report infra.pdf
-python vapt.py 192.168.1.0/24 --mode network        # whole subnet
+python vapt.py 192.168.1.0/24 --mode network        # whole subnet (live-host discovery first)
+python vapt.py 10.0.0.5 --mode network --ports all  # full 1-65535 on one host
 python vapt.py 10.0.0.5                              # IP auto-detected -> network mode
 ```
 Phases: **discovery + service/version scan** (nmap, with a built-in connect-scan

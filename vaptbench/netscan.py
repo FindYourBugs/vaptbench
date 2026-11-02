@@ -60,25 +60,30 @@ def _port_args(ports):
     return ["-p", ports]
 
 
-def scan_host(host, ports="top1000", udp=False, timeout=900, log=None):
+def scan_host(host, ports="top1000", udp=False, timeout=1800, log=None, discover=None):
     """Return {'host', 'up', 'services':[...]}. Uses nmap -sT -sV; falls back to a
-    socket connect-scan. `ports` is a spec: 'top1000', 'all', or '22,80,8443'."""
+    socket connect-scan. `ports` is a spec: 'top1000', 'all', or '22,80,8443'.
+    `discover`: do host discovery first (default: True for a CIDR range, so dead
+    IPs aren't force-scanned; False for a single host, which is forced up with -Pn)."""
     def _l(msg):
         if log:
             log(msg)
 
+    if discover is None:
+        discover = "/" in host          # a CIDR range -> let nmap find live hosts
     if available():
-        return _nmap(host, ports, udp, timeout, _l)
+        return _nmap(host, ports, udp, timeout, _l, discover)
     _l("nmap not installed — using built-in TCP connect-scan (no version detection)")
     return _fallback(host)
 
 
-def _nmap(host, ports, udp, timeout, _l):
-    cmd = ["nmap", "-sT", "-sV", "-Pn", "--open", "-T4"] + _port_args(ports) + \
-          ["-oX", "-", host]
+def _nmap(host, ports, udp, timeout, _l, discover):
+    base = ["nmap", "-sT", "-sV", "--open", "-T4"]
+    if not discover:
+        base.append("-Pn")              # force-scan a single host even if it blocks ping
+    cmd = base + _port_args(ports) + ["-oX", "-", host]
     if udp:
-        cmd = ["nmap", "-sT", "-sU", "-sV", "-Pn", "--open", "-T4",
-               "-p", f"U:{UDP_PORTS},T:1-1000", "-oX", "-", host]
+        cmd = base + ["-sU", "-p", f"U:{UDP_PORTS},T:1-1000", "-oX", "-", host]
     _l(f"nmap {' '.join(cmd[1:])}")
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

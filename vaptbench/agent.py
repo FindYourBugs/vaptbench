@@ -85,7 +85,7 @@ def run_agent(ctx):
             ctx.log("warn", "agent", "stop requested — halting agent")
             break
 
-        decision = ai_mod.ask_json(_prompt(ctx, history), system=_SYSTEM)
+        decision = ai_mod.ask_json(_prompt(ctx, history), system=_SYSTEM, role="reasoner")
         action = (decision.get("action") or "").strip().lower()
         thought = (decision.get("thought") or "")[:200]
 

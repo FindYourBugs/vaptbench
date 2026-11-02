@@ -26,9 +26,11 @@ from . import verifiers3 as V3
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
+from . import critic as critic_mod
 from .skills import load_playbook
 
 AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model is up
+CRITIC_MODE = os.environ.get("VAPT_CRITIC", "1") != "0"  # skeptical review of findings
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -195,6 +197,10 @@ def _run(app, run_id):
             # --- Phase 5: AI finding write-ups (best-effort) ---------------
             if not run.stop_requested:
                 _writeup_phase(run)
+
+            # --- Phase 5b: critic review (skeptical second opinion) --------
+            if CRITIC_MODE and not run.stop_requested:
+                _critic_phase(run)
 
             # --- Phase 6: chain correlated findings ------------------------
             if not run.stop_requested:
@@ -402,7 +408,8 @@ def _chain_phase(run, seen):
                 nr = ai_mod.ask(
                     f"Confirmed findings: {mtitles}\nExplain, in 3-4 sentences, the realistic "
                     f"attack chain and business impact. Be factual, no invented details.",
-                    system="You are a penetration tester summarising an exploit chain.")
+                    system="You are a penetration tester summarising an exploit chain.",
+                    role="reasoner")
                 if nr and len(nr) > 40:
                     desc += "\n\n--- AI chain analysis ---\n" + nr
             except Exception:
@@ -431,6 +438,46 @@ def _writeup_phase(run):
         if upd.get("description"):
             fn.description = upd["description"]
             db.session.commit()
+
+
+def _critic_phase(run):
+    """Skeptical second opinion on each finding via the reasoning model.
+
+    Advisory only: appends an 'Analyst review' to the finding and, if the critic
+    suspects a false positive, flags it for human verification. Never overturns
+    a deterministically confirmed finding on its own.
+    """
+    if not ai_mod.available()[0]:
+        return
+    rmodel = ai_mod._model_for("reasoner")
+    _log(run, "info", "critic", f"Critic reviewing findings ({rmodel})...")
+    cache = {}
+    for fn in Finding.query.filter_by(run_id=run.id).all():
+        if fn.vuln_class == "chain":
+            continue
+        if fn.vuln_class not in cache:
+            pb = load_playbook(fn.vuln_class)
+            cache[fn.vuln_class] = pb["body"] if pb else ""
+        try:
+            rev = critic_mod.review({
+                "title": fn.title, "vuln_class": fn.vuln_class, "severity": fn.severity,
+                "description": fn.description, "poc_request": fn.poc_request,
+                "poc_response": fn.poc_response,
+            }, cache[fn.vuln_class])
+        except Exception as e:
+            _log(run, "warn", "critic", f"review error on {fn.title}: {e}")
+            continue
+        if not rev:
+            continue
+        note = critic_mod.format_note(rev)
+        if note:
+            fn.description = (fn.description or "") + "\n\n" + note
+        if critic_mod.is_fp_suspect(rev):
+            fn.description += "\n\n⚠ Critic flagged possible FALSE POSITIVE — verify before reporting."
+            _log(run, "warn", "critic", f"⚠ possible FP: {fn.title} ({fn.severity})")
+        else:
+            _log(run, "info", "critic", f"reviewed: {fn.title} [{rev.get('verdict','')}]")
+        db.session.commit()
 
 
 def _access_control(run, send, endpoints, identities, seen):

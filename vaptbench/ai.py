@@ -30,6 +30,24 @@ def _cfg():
     }
 
 
+# Different jobs want different models: a reasoning model (e.g. deepseek-r1:14b)
+# for planning + critique, a security-tuned one (e.g. whiterabbitneo) for
+# payloads, a fluent one for report prose. Each falls back to the base model,
+# so a single VAPT_OLLAMA_MODEL still works with nothing else set.
+_ROLE_ENV = {
+    "reasoner": "VAPT_MODEL_REASONER",
+    "payload":  "VAPT_MODEL_PAYLOAD",
+    "writer":   "VAPT_MODEL_WRITER",
+}
+
+
+def _model_for(role, c=None):
+    c = c or _cfg()
+    if role and _ROLE_ENV.get(role):
+        return os.environ.get(_ROLE_ENV[role], "") or c["ollama_model"]
+    return c["ollama_model"]
+
+
 def available():
     """Return (ok, message) for the active backend without raising."""
     c = _cfg()
@@ -43,16 +61,19 @@ def available():
         return (False, f"ollama unreachable: {e}")
 
 
-def ask(prompt, system="", force_backend=None):
-    """Send a prompt to the active (or forced) backend. Returns text."""
+def ask(prompt, system="", force_backend=None, role=None):
+    """Send a prompt to the active (or forced) backend. Returns text.
+
+    `role` ('reasoner'|'payload'|'writer') picks a per-job model when set.
+    """
     c = _cfg()
     backend = force_backend or c["backend"]
     if backend == CLOUD:
         return _ask_cloud(prompt, system, c)
-    return _ask_ollama(prompt, system, c)
+    return _ask_ollama(prompt, system, c, model=_model_for(role, c))
 
 
-def ask_json(prompt, system="", force_backend=None, retries=2):
+def ask_json(prompt, system="", force_backend=None, retries=2, role=None):
     """Ask the model for a JSON object and return it parsed (dict).
 
     Local models drift from strict JSON, so we (a) ask Ollama for JSON mode,
@@ -61,6 +82,7 @@ def ask_json(prompt, system="", force_backend=None, retries=2):
     """
     c = _cfg()
     backend = force_backend or c["backend"]
+    model = _model_for(role, c)
     sys = (system + "\n\nReply with ONE JSON object only. No prose, no markdown fences.").strip()
     last = ""
     for attempt in range(retries + 1):
@@ -68,7 +90,7 @@ def ask_json(prompt, system="", force_backend=None, retries=2):
             prompt + f"\n\nYour previous reply was not valid JSON:\n{last[:400]}\n"
             "Reply again with ONE valid JSON object only.")
         try:
-            raw = (_ask_ollama(p, sys, c, as_json=True) if backend == LOCAL
+            raw = (_ask_ollama(p, sys, c, as_json=True, model=model) if backend == LOCAL
                    else _ask_cloud(p, sys, c))
         except Exception as e:
             last = f"backend error: {e}"
@@ -105,9 +127,9 @@ def _extract_json(text):
     return None
 
 
-def _ask_ollama(prompt, system, c, as_json=False):
+def _ask_ollama(prompt, system, c, as_json=False, model=None):
     payload = {
-        "model": c["ollama_model"],
+        "model": model or c["ollama_model"],
         "prompt": prompt,
         "system": system,
         "stream": False,

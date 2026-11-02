@@ -43,13 +43,30 @@ throwaway temp DB unless you pass `--db`.
 # local (default) — on the Windows host, reachable from WSL:
 #   ollama pull qwen3:14b
 export VAPT_OLLAMA_URL=http://localhost:11434
-export VAPT_OLLAMA_MODEL=qwen3:14b
+export VAPT_OLLAMA_MODEL=qwen3:14b          # base model (used for any unset role)
 
 # hybrid — route a task to the cloud when you choose:
 export VAPT_AI_BACKEND=cloud
 export VAPT_CLOUD_KEY=sk-ant-...
 export VAPT_CLOUD_MODEL=claude-opus-4-8
 ```
+
+### Per-job models (any Ollama model works by name)
+Different jobs want different brains. Each falls back to `VAPT_OLLAMA_MODEL`:
+```bash
+ollama pull deepseek-r1:14b        # strong reasoner
+ollama pull whiterabbitneo         # offensive-security tuned
+export VAPT_MODEL_REASONER=deepseek-r1:14b   # planning + critic (judgment)
+export VAPT_MODEL_PAYLOAD=whiterabbitneo     # payload crafting
+export VAPT_MODEL_WRITER=qwen3:14b           # report prose
+```
+
+### Critic pass (skeptical second opinion)
+After findings are gathered, a reasoning model reviews each one — real impact,
+false-positive risk, a better exploitation path, whether remediation is truly
+needed — and attaches an **Analyst review** to the finding, flagging likely
+false positives for human check. It is **advisory**: it never overturns
+deterministic proof and never invents a bug. Toggle with `VAPT_CRITIC=0`.
 
 ## Skills location
 Defaults to `~/.claude/skills`. Override with `VAPT_SKILLS_DIR`.

@@ -38,7 +38,7 @@ def extra_payloads(vuln_class, skill_body, sample_value=""):
               f"Methodology excerpt:\n{(skill_body or '')[:3000]}\n\n"
               "Give up to 8 distinct payloads to test this parameter.")
     try:
-        return _lines(ai.ask(prompt, system=system))
+        return _lines(ai.ask(prompt, system=system, role="payload"))
     except Exception:
         return []
 
@@ -58,7 +58,7 @@ def writeup(finding, skill_body=""):
               f"Methodology excerpt:\n{(skill_body or '')[:1500]}\n\n"
               "Write the finding.")
     try:
-        text = ai.ask(prompt, system=system)
+        text = ai.ask(prompt, system=system, role="writer")
     except Exception:
         return {}
     if not text or len(text) < 40:

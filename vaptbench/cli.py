@@ -12,6 +12,7 @@ Examples:
   python -m vaptbench.cli https://target/ --no-agent      # deterministic only
 """
 import os
+import re
 import sys
 import time
 import shutil
@@ -87,22 +88,60 @@ def _banner(title):
     return "\n" + _c("1;36", "━━ " + title + " " + "━" * pad)
 
 
+def _norm_url(s):
+    """Return a normalised http(s) URL, or '' if the text isn't a URL/host."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if not re.match(r"^https?://", s, re.I):
+        # bare host/domain -> assume https; anything else (prose) is rejected
+        if re.match(r"^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:/.*)?$", s, re.I):
+            s = "https://" + s
+        else:
+            return ""
+    return s if urlparse(s).hostname else ""
+
+
+def _prompt_url(label, example, required):
+    for _ in range(5):
+        try:
+            raw = input(_c("1;32", f"  {label}") + f" {example} > ").strip()
+        except EOFError:
+            return ""
+        if not raw and not required:
+            return ""
+        u = _norm_url(raw)
+        if u:
+            return u
+        print(_c("31", f"    ✗ that's not a URL — enter something like {example.strip('()')}"))
+    return ""
+
+
 def _interactive_setup(args):
     """Prompt for target + scope + optional login roles when none were given on
-    the command line — a console flow for testers who don't want flags."""
+    the command line — a console flow for testers who don't want flags.
+    Inputs are validated so a stray phrase can't become a bogus target/scope."""
     import getpass
     print(_banner("NEW ENGAGEMENT"))
-    try:
-        args.target = input(_c("1;32", "  Target URL") +
-                             " (e.g. https://shop.example.com/) > ").strip()
-    except EOFError:
-        return
+    args.target = _prompt_url("Target URL", "(e.g. https://shop.example.com/)", required=True)
     if not args.target:
         return
-    sc = input("  Scope rules (space-separated, blank = target host only) > ").strip()
+    host = urlparse(args.target).hostname or ""
+    sc = input(_c("1;32", "  Scope hosts") +
+               f" (space-separated, blank = just {host}) > ").strip()
     if sc:
-        args.scope = sc.split()
-    lu = input("  Login URL (blank = unauthenticated scan) > ").strip()
+        # keep only things that look like a host/domain/IP/CIDR/wildcard
+        good, bad = [], []
+        for tok in sc.split():
+            (good if re.match(r"^[*A-Za-z0-9.\-/:]+\.[A-Za-z0-9*]+", tok) else bad).append(tok)
+        if bad:
+            print(_c("33", f"    ! ignored (not hosts): {' '.join(bad)}"))
+        args.scope = good
+    # The target host is always in scope (you're testing it) so the base is reachable.
+    if host and host not in args.scope:
+        args.scope.append(host)
+
+    lu = _prompt_url("Login URL", "(blank = unauthenticated scan)", required=False)
     if lu:
         args.login_url = lu
         print(_c("90", "  Add role credentials — one per app role. Blank role name to finish."))
@@ -111,12 +150,19 @@ def _interactive_setup(args):
             if not role:
                 break
             user = input("    username / email   > ").strip()
+            if not user:
+                print(_c("33", "    ! no username — role skipped"))
+                continue
             try:
-                pw = getpass.getpass("    password            > ")
+                pw = getpass.getpass("    password (hidden)   > ")
             except Exception:
                 pw = input("    password            > ")
+            if not pw:
+                print(_c("33", "    ! no password entered — login will likely fail"))
             args.role.append(f"{role}:{user}:{pw}")
-            print(_c("32", f"    + role '{role}' added"))
+            print(_c("32", f"    + role '{role}' added ({user})"))
+    else:
+        args.login_url = ""
 
 
 def _print_wrapped(mark_code, mark, body, indent="  "):
@@ -186,6 +232,12 @@ def main(argv=None):
             _interactive_setup(args)
         if not args.target:
             ap.error("a target URL is required (pass it as an argument or run interactively)")
+    else:
+        norm = _norm_url(args.target)
+        if not norm:
+            ap.error(f"target must be a URL (got {args.target!r}); "
+                     "e.g. https://shop.example.com/")
+        args.target = norm
 
     if args.no_agent:
         os.environ["VAPT_AGENT"] = "0"
@@ -202,7 +254,12 @@ def main(argv=None):
     app = create_app()
     with app.app_context():
         host = urlparse(args.target).hostname or args.target
-        scope = "\n".join(args.scope) if args.scope else host
+        # The target host is always in scope so the base URL is reachable, even
+        # when the user also supplied explicit scope rules.
+        scope_list = list(args.scope)
+        if host and host not in scope_list:
+            scope_list.append(host)
+        scope = "\n".join(scope_list)
 
         eng = Engagement(name=f"CLI {host}", authorization=args.authorization)
         db.session.add(eng); db.session.commit()

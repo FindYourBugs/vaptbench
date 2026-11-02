@@ -20,8 +20,23 @@ matrix, PoC capture, and report export.
 ## Run
 ```bash
 pip install -r requirements.txt
-python app.py          # http://127.0.0.1:8090
+python app.py          # web UI  -> http://127.0.0.1:8090
 ```
+
+### CLI (headless, no browser)
+Drive the same autonomous engine from the terminal:
+```bash
+python vapt.py https://shop.example.com/
+python vapt.py https://shop.example.com/ \
+    --role userA:alice@example.com:Passw0rd \
+    --login-url https://shop.example.com/login \
+    --report report.md
+python vapt.py https://target/ --no-agent        # deterministic only
+```
+It streams the live feed, prints a findings summary, and (with `--report`) writes
+a Markdown report. `--role ROLE:USER:PASS` repeatable; `--auth auto|form|bearer|
+cookie|basic`; `--scope RULE` repeatable (defaults to the target host). Uses a
+throwaway temp DB unless you pass `--db`.
 
 ## AI brain (local-first, hybrid-ready)
 ```bash

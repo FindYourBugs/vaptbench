@@ -56,7 +56,8 @@ def _run(app, run_id):
                 _log(run, "warn", "recon", "nmap not installed — using built-in connect-scan (no versions)")
             # single-host reachability probe (CIDR scans skip this)
             single = "/" not in target
-            if single and not netscan.reachable(target):
+            alive, probe_open = (netscan.reachable(target) if single else (True, []))
+            if single and not alive:
                 _log(run, "warn", "recon",
                      f"{target} did not respond on common ports — host may be down, firewalled, "
                      f"or unreachable from this machine. In WSL, LAN IPs aren't always directly "
@@ -65,6 +66,19 @@ def _run(app, run_id):
             result = netscan.scan_host(target, ports=PORTS_SPEC,
                                        log=lambda m: _log(run, "info", "recon", m))
             services = result.get("services", [])
+            # self-heal: if the probe saw open ports nmap's range missed, scan them.
+            found_ports = {s["port"] for s in services}
+            missing = [p for p in probe_open if p not in found_ports]
+            if missing:
+                mp = ",".join(str(p) for p in missing)
+                _log(run, "info", "recon",
+                     f"probe found open port(s) outside the scanned range ({mp}) — scanning those")
+                extra = netscan.scan_host(target, ports=mp,
+                                          log=lambda m: _log(run, "info", "recon", m))
+                have = {(s["host"], s["port"]) for s in services}
+                for s in extra.get("services", []):
+                    if (s["host"], s["port"]) not in have:
+                        services.append(s)
             # group by host, scope-check each host
             by_host = {}
             for svc in services:
@@ -74,7 +88,7 @@ def _run(app, run_id):
                     continue
                 by_host.setdefault(h, []).append(svc)
             if not by_host:
-                if single and not netscan.reachable(target):
+                if single and not alive:
                     _log(run, "warn", "recon",
                          "no services — host appears DOWN/unreachable from here (see note above). "
                          "Run from a host on the same network segment, or check routing/firewall.")

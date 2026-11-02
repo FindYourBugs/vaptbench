@@ -19,8 +19,11 @@ FALLBACK_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 389, 443, 445,
                   6379, 8080, 8443, 9200, 11211, 27017]
 
 
-# Ports used for the quick TCP reachability probe (tells "down" from "no ports").
-_PROBE_PORTS = [443, 80, 22, 445, 3389, 8080, 8443, 8444, 53, 3306, 5000, 9200]
+# Ports used for the quick TCP reachability probe — includes common high/admin
+# ports that nmap's top-1000 misses (8444/9000/10000/…), so the scan self-heals.
+_PROBE_PORTS = [443, 80, 22, 445, 3389, 8080, 8443, 8444, 53, 3306, 5000, 9200,
+                8000, 8008, 8081, 8888, 9000, 9090, 9443, 10000, 5432, 6379,
+                27017, 1433, 2375, 5601, 15672]
 
 
 def available():
@@ -28,18 +31,21 @@ def available():
 
 
 def reachable(host, timeout=1.0):
-    """Quick liveness probe: True if any common TCP port accepts a connection
-    (a RST/refused also proves the host is up). Distinguishes an unreachable
-    host from one that's up with nothing open in the scanned range."""
+    """Quick liveness probe. Returns (alive, open_ports): alive is True if any
+    common port connects OR refuses (refused still proves the host is up);
+    open_ports are the probe ports that actually ACCEPTED a connection — used to
+    catch services on ports outside nmap's default range (e.g. 8444)."""
+    alive, open_ports = False, []
     for port in _PROBE_PORTS:
         try:
             with socket.create_connection((host, port), timeout=timeout):
-                return True
+                alive = True
+                open_ports.append(port)
         except ConnectionRefusedError:
-            return True            # refused = host is alive, port just closed
+            alive = True            # refused = host is alive, port just closed
         except (OSError, socket.timeout):
             continue
-    return False
+    return alive, open_ports
 
 
 def _port_args(ports):

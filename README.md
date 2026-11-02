@@ -95,6 +95,27 @@ discovered URLs as captured requests for the matrix: `httpx`, `whatweb`,
 `katana`, `gau`, `waybackurls`, `ffuf` (set `VAPT_WORDLIST`), `nuclei`.
 Missing binaries are reported cleanly, not fatal.
 
+## SPA API discovery (the real attack surface on JS apps)
+A React/Vue/Angular/Next app ships a tiny HTML shell and does everything over
+XHR/fetch to a backend API — so the server HTML has no `?param=` links and the
+classic crawl finds nothing to test. The engine now surfaces the backend API two
+ways before testing (Phase 2 recon):
+- **Runtime capture** — a headless Chromium (authenticated with the role's
+  captured session) loads the app, lets it make its real network calls, clicks
+  through in-app links, and records every in-scope **XHR/fetch** endpoint. This
+  is ground truth: endpoints the app actually uses.
+- **Static bundle harvest** (browserless fallback) — fetches the HTML shell + JS
+  bundles and greps out API hosts, `/api/vN/` base paths, and resource-word
+  route literals (minifiers store routes as string segments), reconstructing
+  candidate URLs. Mirrors the `hunt-spa-api` play.
+
+Discovered API routes are **prioritised** ahead of static page URLs, persisted as
+captured requests (Repeater / access-control matrix can replay them), and fed to
+the agent + injection + authz matrix — which is exactly where broken-access /
+missing-auth on an API route group shows up. Toggle with `VAPT_SPA_CRAWL=0`.
+Runtime capture needs Playwright (installed by `scripts/setup_kali.sh`); without
+it the static harvest still runs.
+
 ## Autonomous engine (Start VAPT)
 Click **Start VAPT** on a target and the engine runs the whole web VAPT in the
 background — authenticate every role → recon/map → test & verify → access

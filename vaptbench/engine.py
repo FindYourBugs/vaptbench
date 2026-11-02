@@ -27,7 +27,10 @@ from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
 from . import critic as critic_mod
+from . import spa_crawl
 from .skills import load_playbook
+
+SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch API surface
 
 AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model is up
 CRITIC_MODE = os.environ.get("VAPT_CRITIC", "1") != "0"  # skeptical review of findings
@@ -119,6 +122,52 @@ def _discover(base_url, base_html, scope_rules, run):
     return ordered[:MAX_ENDPOINTS]
 
 
+def _spa_discover(run, send, t, endpoints, primary, scope):
+    """Find the SPA's backend API (XHR/fetch + JS-bundle routes) and merge it in.
+
+    API routes are the true attack surface on a JS app, so they are prioritised
+    ahead of static page URLs and persisted as captured requests (for the
+    Repeater / access-control matrix). Returns the merged, re-capped list.
+    """
+    _log(run, "info", "spa", "Discovering SPA backend API (XHR/fetch capture + JS bundle harvest)...")
+    try:
+        api = spa_crawl.discover_api(
+            t.base_url, send, scope, identity=primary,
+            log=lambda lvl, ph, msg: _log(run, lvl, ph, msg))
+    except Exception as e:
+        _log(run, "warn", "spa", f"SPA API discovery error: {e}")
+        return endpoints
+    if not api:
+        _log(run, "info", "spa", "no SPA API endpoints discovered (static site, or app made no in-scope calls)")
+        return endpoints
+
+    existing = set(endpoints)
+    api_urls, new = [], 0
+    for it in api:
+        url = it["url"]
+        if url not in existing:
+            new += 1
+            # Persist so the Repeater / matrix can replay it.
+            db.session.add(RequestLog(target_id=t.id, method=it.get("method", "GET"),
+                                      url=url, resp_body=""))
+        if url not in api_urls:
+            api_urls.append(url)
+    db.session.commit()
+
+    withparam = sum(1 for u in api_urls if urlparse(u).query)
+    _log(run, "info", "spa",
+         f"SPA API: {len(api_urls)} endpoint(s) ({new} new, {withparam} with params) — "
+         f"prioritised as attack surface")
+
+    # API endpoints first (query'd ones ahead), then the original page URLs.
+    api_sorted = sorted(api_urls, key=lambda u: (0 if urlparse(u).query else 1, len(u)))
+    merged, out = set(), []
+    for u in api_sorted + endpoints:
+        if u not in merged:
+            merged.add(u); out.append(u)
+    return out[:MAX_ENDPOINTS]
+
+
 def _run(app, run_id):
     with app.app_context():
         run = Run.query.get(run_id)
@@ -157,6 +206,12 @@ def _run(app, run_id):
                 return
             endpoints = _discover(t.base_url, base.get("text", ""), scope, run)
             _log(run, "info", "recon", f"{len(endpoints)} endpoint(s) in scope to test")
+
+            # SPA API discovery: capture the real XHR/fetch backend routes that a
+            # JS app talks to (invisible in server HTML). This is the actual
+            # attack surface on React/Vue/Angular/Next targets.
+            if SPA_CRAWL:
+                endpoints = _spa_discover(run, send, t, endpoints, primary, scope)
 
             # Passive checks on the base response.
             for f in (V.check_headers(t.base_url, base) + V.check_cookies(t.base_url, base)

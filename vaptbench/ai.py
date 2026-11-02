@@ -8,7 +8,7 @@ for a specific task like report writing.
 Config via env:
     VAPT_AI_BACKEND   = local | cloud        (default local)
     VAPT_OLLAMA_URL   = http://localhost:11434
-    VAPT_OLLAMA_MODEL = qwen2.5-coder:14b
+    VAPT_OLLAMA_MODEL = qwen3:14b
     VAPT_CLOUD_KEY    = <anthropic api key>  (only if backend=cloud)
     VAPT_CLOUD_MODEL  = claude-opus-4-8
 """
@@ -24,7 +24,7 @@ def _cfg():
     return {
         "backend": os.environ.get("VAPT_AI_BACKEND", LOCAL),
         "ollama_url": os.environ.get("VAPT_OLLAMA_URL", "http://localhost:11434"),
-        "ollama_model": os.environ.get("VAPT_OLLAMA_MODEL", "qwen2.5-coder:14b"),
+        "ollama_model": os.environ.get("VAPT_OLLAMA_MODEL", "qwen3:14b"),
         "cloud_key": os.environ.get("VAPT_CLOUD_KEY", ""),
         "cloud_model": os.environ.get("VAPT_CLOUD_MODEL", "claude-opus-4-8"),
     }
@@ -52,19 +52,74 @@ def ask(prompt, system="", force_backend=None):
     return _ask_ollama(prompt, system, c)
 
 
-def _ask_ollama(prompt, system, c):
+def ask_json(prompt, system="", force_backend=None, retries=2):
+    """Ask the model for a JSON object and return it parsed (dict).
+
+    Local models drift from strict JSON, so we (a) ask Ollama for JSON mode,
+    (b) extract the first {...} block, and (c) retry with a repair nudge.
+    Returns {} if it never produces valid JSON — callers must handle that.
+    """
+    c = _cfg()
+    backend = force_backend or c["backend"]
+    sys = (system + "\n\nReply with ONE JSON object only. No prose, no markdown fences.").strip()
+    last = ""
+    for attempt in range(retries + 1):
+        p = prompt if attempt == 0 else (
+            prompt + f"\n\nYour previous reply was not valid JSON:\n{last[:400]}\n"
+            "Reply again with ONE valid JSON object only.")
+        try:
+            raw = (_ask_ollama(p, sys, c, as_json=True) if backend == LOCAL
+                   else _ask_cloud(p, sys, c))
+        except Exception as e:
+            last = f"backend error: {e}"
+            continue
+        last = raw
+        obj = _extract_json(raw)
+        if obj is not None:
+            return obj
+    return {}
+
+
+def _extract_json(text):
+    """Pull the first balanced {...} object out of a model reply."""
+    if not text:
+        return None
+    text = text.strip()
+    # Strip a leading ```json fence if present.
+    if text.startswith("```"):
+        text = text.split("```", 2)[1].lstrip("json").strip() if "```" in text[3:] else text[3:]
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _ask_ollama(prompt, system, c, as_json=False):
     payload = {
         "model": c["ollama_model"],
         "prompt": prompt,
         "system": system,
         "stream": False,
     }
+    if as_json:
+        payload["format"] = "json"      # Ollama constrains output to valid JSON
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         c["ollama_url"] + "/api/generate", data=data,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=180) as r:
         return json.loads(r.read()).get("response", "")
 
 

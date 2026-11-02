@@ -26,9 +26,9 @@ python app.py          # http://127.0.0.1:8090
 ## AI brain (local-first, hybrid-ready)
 ```bash
 # local (default) — on the Windows host, reachable from WSL:
-#   ollama pull qwen2.5-coder:14b
+#   ollama pull qwen3:14b
 export VAPT_OLLAMA_URL=http://localhost:11434
-export VAPT_OLLAMA_MODEL=qwen2.5-coder:14b
+export VAPT_OLLAMA_MODEL=qwen3:14b
 
 # hybrid — route a task to the cloud when you choose:
 export VAPT_AI_BACKEND=cloud
@@ -66,9 +66,21 @@ Missing binaries are reported cleanly, not fatal.
 ## Autonomous engine (Start VAPT)
 Click **Start VAPT** on a target and the engine runs the whole web VAPT in the
 background — authenticate every role → recon/map → test & verify → access
-control → findings — with a **live feed** you watch (`/run/<id>`). Phase 1 is
-fully deterministic (works even with the AI offline); correctness comes from
-`verifiers.py`, which only emits a finding when it can *prove* it.
+control → findings — with a **live feed** you watch (`/run/<id>`). The test
+tiers are fully deterministic (work even with the AI offline); correctness comes
+from `verifiers.py`, which only emits a finding when it can *prove* it.
+
+### Agent mode (the autonomous brain)
+When the local model is up, an **agentic planner** (`agent.py`) drives the run:
+the model observes the mapped surface + findings so far and chooses the next
+**action** from a fixed, safe set (`probe`, `crawl`, `test`, `inject`,
+`advanced`, `access_control`, `finish`). Every decision streams to the live feed
+so you watch it reason. Crucially, **the model never asserts a bug** — it only
+decides *where* to look; the deterministic verifiers decide *what is real*. So
+you get PentestGPT-agent-style autonomy with no hallucinated findings. If the
+model is offline or uncooperative the engine falls back to the fixed
+deterministic sweep automatically. Toggle with `VAPT_AGENT=0`; step budget via
+`VAPT_AGENT_STEPS` (default 24).
 
 **Tier-1 classes verified now:** missing security headers, cookie flags,
 clickjacking, CORS misconfig, dangerous HTTP methods, open redirect, reflected

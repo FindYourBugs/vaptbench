@@ -25,8 +25,10 @@ from . import verifiers2 as V2
 from . import verifiers3 as V3
 from . import ai_tester
 from . import ai as ai_mod
+from . import agent as agent_mod
 from .skills import load_playbook
 
+AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model is up
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -161,33 +163,29 @@ def _run(app, run_id):
             for f in V.check_exposed_files(send, t.base_url):
                 _add_finding(run, seen, f)
 
-            # --- Phase 3: test & exploit (Tier-1) --------------------------
-            _log(run, "info", "test", "Testing endpoints (Tier-1 deterministic classes)...")
-            for i, url in enumerate(endpoints, 1):
-                if run.stop_requested:
-                    _log(run, "warn", "test", "stop requested — halting"); break
-                run.endpoints_tested = i
-                _log(run, "test", "test", f"[{i}/{len(endpoints)}] {url}")
-                g = send("GET", url, identity=primary)
-                if g.get("ok"):
-                    for f in V.check_clickjacking(url, g):
-                        _add_finding(run, seen, f)
-                for fn in (V.check_cors, V.check_methods, V.check_open_redirect,
-                           V.check_reflected_xss, V.check_error_sqli):
-                    try:
-                        for f in fn(send, url):
-                            _add_finding(run, seen, f)
-                    except Exception as e:  # one check failing must not kill the run
-                        _log(run, "warn", "test", f"{fn.__name__} error on {url}: {e}")
-                db.session.commit()
+            # --- Phase 3: test & exploit -----------------------------------
+            # Agent mode: the model drives order/depth across all tiers. If the
+            # model is down or uncooperative it returns False and we fall back
+            # to the fixed deterministic sweep below. Either way, verifiers are
+            # the only thing that can record a finding.
+            agent_drove = False
+            if AGENT_MODE:
+                ctx = agent_mod.Ctx(
+                    run=run, send=send, scope=scope, endpoints=endpoints,
+                    identities=identities, seen=seen,
+                    add_finding=lambda f: _add_finding(run, seen, f),
+                    log=lambda lvl, ph, msg: _log(run, lvl, ph, msg),
+                    oob_host=OOB_HOST)
+                agent_drove = agent_mod.run_agent(ctx)
+                if agent_drove:
+                    endpoints = ctx.endpoints        # keep anything the agent crawled
+                    run.endpoints_tested = max(run.endpoints_tested or 0, len(ctx.tested))
+                    db.session.commit()
 
-            # --- Phase 3b: injection (Tier-2 deterministic + AI-assisted) ---
-            if not run.stop_requested:
-                _inject_phase(run, send, t, endpoints, identities, seen)
-
-            # --- Phase 3c: advanced (SSRF/OOB, stored XSS, DOM) ------------
-            if not run.stop_requested:
-                _advanced_phase(run, send, t, endpoints, seen)
+            if agent_drove:
+                _log(run, "info", "test", "Agent completed the test tiers; running baseline access-control + report")
+            else:
+                _deterministic_sweep(run, send, t, endpoints, identities, seen, primary)
 
             # --- Phase 4: access-control matrix ----------------------------
             if len(identities) >= 1 and not run.stop_requested:
@@ -214,6 +212,36 @@ def _run(app, run_id):
             run.status = "error"; run.finished = datetime.utcnow()
             db.session.add(RunLog(run_id=run.id, level="error", phase="error", message=str(e)))
             db.session.commit()
+
+
+def _deterministic_sweep(run, send, t, endpoints, identities, seen, primary=None):
+    """The original fixed-script test tiers — fallback when the agent is off."""
+    _log(run, "info", "test", "Testing endpoints (Tier-1 deterministic classes)...")
+    for i, url in enumerate(endpoints, 1):
+        if run.stop_requested:
+            _log(run, "warn", "test", "stop requested — halting"); break
+        run.endpoints_tested = i
+        _log(run, "test", "test", f"[{i}/{len(endpoints)}] {url}")
+        g = send("GET", url, identity=primary)
+        if g.get("ok"):
+            for f in V.check_clickjacking(url, g):
+                _add_finding(run, seen, f)
+        for fn in (V.check_cors, V.check_methods, V.check_open_redirect,
+                   V.check_reflected_xss, V.check_error_sqli):
+            try:
+                for f in fn(send, url):
+                    _add_finding(run, seen, f)
+            except Exception as e:  # one check failing must not kill the run
+                _log(run, "warn", "test", f"{fn.__name__} error on {url}: {e}")
+        db.session.commit()
+
+    # --- Tier-2 injection (deterministic + AI-assisted) ---
+    if not run.stop_requested:
+        _inject_phase(run, send, t, endpoints, identities, seen)
+
+    # --- Tier-3 advanced (SSRF/OOB, stored XSS, DOM) ---
+    if not run.stop_requested:
+        _advanced_phase(run, send, t, endpoints, seen)
 
 
 def _collect_tokens(identities):

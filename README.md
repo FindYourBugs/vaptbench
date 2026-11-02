@@ -37,9 +37,23 @@ python vapt.py https://shop.example.com/ \
 python vapt.py https://target/ --no-agent        # deterministic only
 ```
 It streams the live feed, prints a findings summary, and (with `--report`) writes
-a Markdown report. `--role ROLE:USER:PASS` repeatable; `--auth auto|form|bearer|
-cookie|basic`; `--scope RULE` repeatable (defaults to the target host). Uses a
-throwaway temp DB unless you pass `--db`.
+a report. `--role ROLE:USER:PASS` repeatable; `--auth auto|form|bearer|cookie|
+basic`; `--scope RULE` repeatable (defaults to the target host). Uses a throwaway
+temp DB unless you pass `--db`.
+
+### Reports (format by extension)
+```bash
+python vapt.py https://target/ --report out.pdf \
+    --company "SysTools Group" --tester "Shrikant Shinde" --logo logo.png
+```
+- **`.pdf`** — branded, client-ready report (cover, exec summary with severity
+  donut + category bar, CVSS/CWE/OWASP mapping per finding, PoC evidence,
+  remediation, analyst review, sign-off). Rendered via headless Chromium
+  (Playwright); falls back to `.html` with a message if Chromium is unavailable.
+- **`.html`** — same report, no browser needed.
+- **`.md`** — the plain Markdown report.
+
+Branding flags: `--company`, `--tester`, `--client`, `--logo`.
 
 ## AI brain (local-first, hybrid-ready)
 ```bash

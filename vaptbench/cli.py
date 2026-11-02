@@ -220,7 +220,13 @@ def main(argv=None):
     ap.add_argument("--no-agent", action="store_true",
                     help="disable the LLM agent; run the deterministic sweep only")
     ap.add_argument("--report", default="", metavar="PATH",
-                    help="write a Markdown report to this path")
+                    help="write a report; extension picks format: .pdf (branded, "
+                         "needs Chromium) | .html | .md")
+    ap.add_argument("--company", default="VAPTBench Security",
+                    help="company name on the report cover/footer")
+    ap.add_argument("--tester", default="", help="lead tester name on the report")
+    ap.add_argument("--client", default="", help="client/organisation name")
+    ap.add_argument("--logo", default="", help="path to a logo image for the cover")
     ap.add_argument("--db", default="", help="sqlite db path (default: throwaway temp db)")
     ap.add_argument("--authorization", default="CLI-authorized engagement",
                     help="authorization note recorded with the engagement")
@@ -306,8 +312,10 @@ def main(argv=None):
 
         _summary(app, rid)
         if args.report:
-            _write_report(app, rid, args.target, args.report)
-            print(_c("32", f"\n  report written: {args.report}"))
+            meta = {"company": args.company, "tester": args.tester,
+                    "client": args.client or host, "logo": args.logo,
+                    "target": args.target, "scope": scope.replace(chr(10), ", ")}
+            _write_report(app, rid, args.target, args.report, meta)
     return 0
 
 
@@ -368,13 +376,22 @@ def _summary(app, rid):
               f"{run.requests_sent} request(s)")
 
 
-def _write_report(app, rid, target, path):
+def _write_report(app, rid, target, path, meta=None):
     from vaptbench.models import Run, Finding
+    from vaptbench import report as report_mod
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     with app.app_context():
         run = Run.query.get(rid)
         findings = sorted(Finding.query.filter_by(run_id=rid).all(),
                           key=lambda f: order.get(f.severity, 5))
+        # .pdf / .html -> branded report module; .md -> the markdown below.
+        if path.lower().endswith((".pdf", ".html", ".htm")):
+            ok, msg = report_mod.write(run, findings, path, meta or {"target": target})
+            if ok:
+                print(_c("32", f"\n  report written: {msg}"))
+            else:
+                print(_c("33", f"\n  {msg}"))
+            return
         lines = [
             f"# VAPT Report — {target}",
             "",
@@ -414,6 +431,7 @@ def _write_report(app, rid, target, path):
                           (f.poc_response or "")[:1500].strip(), "```"]
         with open(path, "w") as fh:
             fh.write("\n".join(lines) + "\n")
+        print(_c("32", f"\n  report written: {path}"))
 
 
 if __name__ == "__main__":

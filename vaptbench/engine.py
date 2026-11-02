@@ -282,7 +282,8 @@ def _run(app, run_id):
                     db.session.commit()
 
             if agent_drove:
-                _log(run, "info", "test", "Agent completed the test tiers; running baseline access-control + report")
+                _log(run, "info", "test", "Agent completed the test tiers; mopping up any untested parameters")
+                _mopup(run, send, endpoints, seen, primary, ctx)
             else:
                 _deterministic_sweep(run, send, t, endpoints, identities, seen, primary)
 
@@ -315,6 +316,38 @@ def _run(app, run_id):
             run.status = "error"; run.finished = datetime.utcnow()
             db.session.add(RunLog(run_id=run.id, level="error", phase="error", message=str(e)))
             db.session.commit()
+
+
+def _mopup(run, send, endpoints, seen, primary, ctx):
+    """After agent mode, guarantee every PARAMETERISED endpoint got Tier-1 +
+    Tier-2 — so a finding is never missed just because the agent didn't pick it.
+    Skips URLs the agent already covered (tracked on ctx)."""
+    param_eps = [u for u in endpoints
+                 if urlparse(u).query and not is_static_asset(u)][:MAX_INJECT_ENDPOINTS]
+    for url in param_eps:
+        if run.stop_requested:
+            break
+        if url not in ctx.tested:
+            ctx.tested.add(url)
+            _log(run, "test", "test", f"mop-up Tier-1: {url}")
+            for fn in (V.check_reflected_xss, V.check_error_sqli,
+                       V.check_open_redirect, V.check_cors):
+                try:
+                    for f in fn(send, url):
+                        _add_finding(run, seen, f)
+                except Exception as e:
+                    _log(run, "warn", "test", f"{fn.__name__} error: {e}")
+        if url not in ctx.injected:
+            ctx.injected.add(url)
+            _log(run, "test", "inject", f"mop-up Tier-2: {url}")
+            for fn in (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
+                       V2.check_time_sqli, V2.check_cmd_injection):
+                try:
+                    for f in fn(send, url):
+                        _add_finding(run, seen, f)
+                except Exception as e:
+                    _log(run, "warn", "inject", f"{fn.__name__} error: {e}")
+        db.session.commit()
 
 
 def _deterministic_sweep(run, send, t, endpoints, identities, seen, primary=None):

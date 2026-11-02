@@ -24,7 +24,17 @@ from . import verifiers3 as V3
 from . import ai as ai_mod
 from .skills import list_web_playbooks
 
-MAX_STEPS = int(os.environ.get("VAPT_AGENT_STEPS", "24"))
+_ENV_STEPS = os.environ.get("VAPT_AGENT_STEPS", "")
+MAX_STEPS = int(_ENV_STEPS) if _ENV_STEPS.isdigit() else 24   # fallback; run_agent scales it
+
+
+def _budget(ctx):
+    """Step budget: explicit env override, else scale with the surface size so
+    big apps get enough steps and tiny ones don't spin. Capped to stay sane."""
+    if _ENV_STEPS.isdigit():
+        return int(_ENV_STEPS)
+    return max(30, min(80, len(ctx.endpoints) + 2 * sum(
+        1 for u in ctx.endpoints if urlparse(u).query)))
 
 # The action vocabulary the model may choose from. Keeping it fixed and small
 # is what keeps a 14B model reliable — it picks WHERE to look, not free shell.
@@ -65,6 +75,8 @@ class Ctx:
         self.primary = identities[0] if identities else None
         self.tested = set()                     # urls already tier-1 tested
         self.injected = set()
+        self.advanced = set()                   # urls already advanced-tested
+        self.accessed = set()                   # urls already authz-replayed
 
 
 # --------------------------------------------------------------------------
@@ -76,11 +88,12 @@ def run_agent(ctx):
         ctx.log("warn", "agent", f"AI unavailable ({why}) — agent mode needs the model; skipping")
         return False
 
-    ctx.log("info", "agent", f"Agent mode: {ai_mod._cfg()['ollama_model']} planning up to {MAX_STEPS} steps")
+    budget = _budget(ctx)
+    ctx.log("info", "agent", f"Agent mode: {ai_mod._cfg()['ollama_model']} planning up to {budget} steps")
     history = []
     bad_streak = 0
 
-    for step in range(1, MAX_STEPS + 1):
+    for step in range(1, budget + 1):
         if getattr(ctx.run, "stop_requested", False):
             ctx.log("warn", "agent", "stop requested — halting agent")
             break
@@ -224,6 +237,8 @@ def _crawl(ctx, url):
 def _test(ctx, url, classes):
     if not _in_scope_url(ctx, url):
         return "url not in scope / unknown"
+    if url in ctx.tested:
+        return "already Tier-1 tested this URL — pick a different endpoint"
     ctx.tested.add(url)
     hits = []
     # response-based check needs a GET first
@@ -247,6 +262,8 @@ def _inject(ctx, url):
     from .engine import is_static_asset
     if is_static_asset(url):
         return "skipped — static asset (JS/CSS/image) has no server-side injection surface"
+    if url in ctx.injected:
+        return "already injected this URL (no new surface) — pick a different endpoint"
     ctx.injected.add(url)
     hits = []
     for fn in (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
@@ -265,6 +282,9 @@ def _advanced(ctx, url):
     from .engine import is_static_asset
     if is_static_asset(url):
         return "skipped — static asset (JS/CSS/image) is not an SSRF/stored-XSS surface"
+    if url in ctx.advanced:
+        return "already advanced-tested this URL — pick a different endpoint"
+    ctx.advanced.add(url)
     import time
     import uuid
     from .models import OobHit
@@ -293,6 +313,9 @@ def _advanced(ctx, url):
 def _access(ctx, url):
     if not _in_scope_url(ctx, url):
         return "url not in scope / unknown"
+    if url in ctx.accessed:
+        return "already access-control replayed this URL — pick a different endpoint"
+    ctx.accessed.add(url)
     from .engine import _access_control
     before = ctx.run.findings_count or 0
     _access_control(ctx.run, ctx.send, [url], ctx.identities, ctx.seen)

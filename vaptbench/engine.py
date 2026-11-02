@@ -213,7 +213,11 @@ def _run(app, run_id):
             if SPA_CRAWL:
                 endpoints = _spa_discover(run, send, t, endpoints, primary, scope)
 
-            # Passive checks on the base response.
+            # Passive checks on the base response (phase back to recon so these
+            # findings are attributed correctly, not to the SPA sub-phase).
+            _log(run, "info", "recon",
+                 "Passive checks on base response (security headers, cookie flags, "
+                 "clickjacking, exposed files)...")
             for f in (V.check_headers(t.base_url, base) + V.check_cookies(t.base_url, base)
                       + V.check_clickjacking(t.base_url, base)):
                 _add_finding(run, seen, f)

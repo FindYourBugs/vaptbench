@@ -14,6 +14,8 @@ Examples:
 import os
 import sys
 import time
+import shutil
+import textwrap
 import argparse
 import warnings
 from datetime import datetime
@@ -32,14 +34,75 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 _TTY = sys.stdout.isatty()
 def _c(code, s):
     return f"\033[{code}m{s}\033[0m" if _TTY else s
-LEVELCOL = {"info": "36", "test": "34", "hit": "32", "warn": "33", "error": "31"}
+
+_WIDTH = min(shutil.get_terminal_size((100, 24)).columns, 108)
+
+# Each engine phase -> the human-readable section it belongs to. Printing a
+# banner when the section changes turns the flat feed into a readable, phase-wise
+# narrative a tester can follow top to bottom.
+SECTIONS = {
+    "start":    "SETUP",
+    "auth":     "PHASE 1 · AUTHENTICATION",
+    "recon":    "PHASE 2 · RECON & MAPPING",
+    "spa":      "PHASE 2b · SPA API DISCOVERY",
+    "agent":    "PHASE 3 · AUTONOMOUS TESTING  (AI agent decides each step)",
+    "test":     "PHASE 3 · TESTING",
+    "inject":   "PHASE 3b · INJECTION  (Tier-2: SSTI / LFI / NoSQLi / time-SQLi / cmd)",
+    "advanced": "PHASE 3c · ADVANCED  (SSRF via OOB, stored & DOM XSS)",
+    "access":   "PHASE 4 · ACCESS CONTROL  (replay each endpoint across roles)",
+    "report":   "PHASE 5 · REPORT WRITE-UP",
+    "critic":   "PHASE 5b · CRITIC REVIEW  (skeptical second opinion)",
+    "chain":    "PHASE 6 · ATTACK-CHAIN CORRELATION",
+    "done":     "COMPLETE",
+    "error":    "ERROR",
+}
+# Short coloured marker per log level (replaces the old right-aligned word).
+MARK = {"info": ("·", "36"), "test": ("→", "34"), "hit": ("✓", "32"),
+        "warn": ("!", "33"), "error": ("✗", "31")}
 
 
-def _fmt(row):
+def _banner(title):
+    pad = max(4, _WIDTH - len(title) - 4)
+    return "\n" + _c("1;36", "━━ " + title + " " + "━" * pad)
+
+
+def _print_wrapped(mark_code, mark, body, indent="  "):
+    """Print one feed line, word-wrapped with a hanging indent (nothing is cut
+    mid-word, long AI thoughts read as a tidy paragraph)."""
+    cont = indent + "  "
+    lines = textwrap.wrap(body, width=_WIDTH - len(cont),
+                          break_long_words=False, break_on_hyphens=False) or [""]
+    print(f"{indent}{_c(mark_code, mark)} {lines[0]}")
+    for extra in lines[1:]:
+        print(f"{cont}{extra}")
+
+
+def _render(row):
+    """Render a single RunLog row in a phase-aware, readable way."""
     lvl = row.level or "info"
-    tag = _c(LEVELCOL.get(lvl, "0"), f"{lvl:>5}")
-    ph = _c("90", f"[{row.phase}]")
-    return f"  {tag} {ph} {row.message}"
+    msg = row.message or ""
+    mark, code = MARK.get(lvl, ("·", "0"))
+
+    # Agent step lines: "step N: ..." -> grouped Step heading + indented result.
+    if msg.startswith("step ") and ":" in msg:
+        head, _, rest = msg.partition(":")
+        n = head.replace("step", "Step").strip().title()  # "Step 7"
+        rest = rest.strip()
+        if lvl == "test":                                   # the action + outcome
+            rest = rest.replace(" -> ", "   ⇒  ")
+            _print_wrapped("34", "→", rest, indent="      ")
+        else:                                               # the agent's reasoning
+            _print_wrapped("1;35", "▸", f"{n}  {rest}", indent="  ")
+        return
+
+    # Finding hits: colour by whether they're proven or just flagged.
+    if lvl == "hit":
+        proven = "(confirmed)" in msg
+        _print_wrapped("32" if proven else "33", "✓" if proven else "?",
+                       msg.lstrip("✓? ").strip())
+        return
+
+    _print_wrapped(code, mark, msg)
 
 
 def main(argv=None):
@@ -127,16 +190,27 @@ def main(argv=None):
 
 
 def _follow(app, rid):
-    """Tail the RunLog for this run until it reaches a terminal state."""
+    """Tail the RunLog for this run until it reaches a terminal state, printing a
+    phase banner whenever the section changes so the feed reads phase-wise."""
     from vaptbench.models import Run, RunLog
     last = 0
+    state = {"section": None}
+
+    def emit(r):
+        nonlocal last
+        last = r.id
+        sect = SECTIONS.get(r.phase, r.phase.upper() if r.phase else "")
+        if sect and sect != state["section"]:
+            state["section"] = sect
+            print(_banner(sect))
+        _render(r)
+
     while True:
         with app.app_context():
             rows = (RunLog.query.filter(RunLog.run_id == rid, RunLog.id > last)
                     .order_by(RunLog.id).all())
             for r in rows:
-                last = r.id
-                print(_fmt(r))
+                emit(r)
             run = Run.query.get(rid)
             status = run.status if run else "error"
         if status in ("done", "error", "stopped"):
@@ -144,7 +218,7 @@ def _follow(app, rid):
             with app.app_context():
                 for r in (RunLog.query.filter(RunLog.run_id == rid, RunLog.id > last)
                           .order_by(RunLog.id).all()):
-                    print(_fmt(r))
+                    emit(r)
             return
         time.sleep(0.5)
 

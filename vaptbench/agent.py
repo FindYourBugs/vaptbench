@@ -87,7 +87,7 @@ def run_agent(ctx):
 
         decision = ai_mod.ask_json(_prompt(ctx, history), system=_SYSTEM, role="reasoner")
         action = (decision.get("action") or "").strip().lower()
-        thought = (decision.get("thought") or "")[:200]
+        thought = " ".join((decision.get("thought") or "").split())[:280]
 
         if action not in ("probe", "crawl", "test", "inject", "advanced",
                            "access_control", "finish"):

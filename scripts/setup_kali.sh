@@ -77,26 +77,41 @@ grep -q 'VAPT_WORDLIST' "$RC" 2>/dev/null || echo 'export VAPT_WORDLIST=/usr/sha
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$APP_DIR"
 
-# Prefer a stable interpreter (3.14 often lacks wheels for playwright/greenlet).
-PY=python3
-for cand in python3.13 python3.12 python3.11 python3; do
-  have "$cand" && { PY="$cand"; break; }
-done
-say "python venv + requirements ($APP_DIR, using $PY)"
+# Build a WORKING venv. A distro upgrade (e.g. python3 -> 3.14) can leave an
+# orphaned python3.13 behind with no ensurepip, so a venv built from it has no
+# pip. We validate pip in the fresh venv and fall through to the next
+# interpreter if it's missing. python3 (the current, full interpreter) first.
+say "python venv + requirements ($APP_DIR)"
 
-# Rebuild the venv if missing or broken (e.g. its interpreter was upgraded away).
-if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import sys" 2>/dev/null; then
+build_venv() {   # $1 = interpreter; returns 0 only if the venv ends up with pip
   rm -rf .venv
-  "$PY" -m venv .venv || { printf "   ${c_r}venv creation failed — is $PY-venv installed?${c_0}\n"; }
+  "$1" -m venv .venv 2>/dev/null || return 1
+  .venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1   # best-effort
+  .venv/bin/python -m pip --version >/dev/null 2>&1
+}
+
+VPY=""
+for cand in python3 python3.13 python3.12 python3.11; do
+  have "$cand" || continue
+  if build_venv "$cand"; then
+    VPY="$APP_DIR/.venv/bin/python"
+    printf "   venv built with %s\n" "$cand"
+    break
+  fi
+  printf "   ${c_r}%s cannot produce a pip-enabled venv; trying next${c_0}\n" "$cand"
+done
+
+if [ -z "$VPY" ]; then
+  printf "   ${c_r}no interpreter could build a working venv — install python3-venv/pip${c_0}\n"
+else
+  "$VPY" -m pip install -q --upgrade pip
+  "$VPY" -m pip install -q -r requirements.txt && printf "   ${c_g}python deps installed${c_0}\n" \
+    || printf "   ${c_r}pip install failed${c_0}\n"
 fi
-VPY="$APP_DIR/.venv/bin/python"
-"$VPY" -m pip install -q --upgrade pip
-"$VPY" -m pip install -q -r requirements.txt && printf "   ${c_g}python deps installed${c_0}\n" \
-  || printf "   ${c_r}pip install failed${c_0}\n"
 
 # Headless browser for autonomous login on JS/SPA apps (Playwright + Chromium).
 say "installing headless browser (Chromium via Playwright)"
-if "$VPY" -c "import playwright" 2>/dev/null; then
+if [ -n "$VPY" ] && "$VPY" -c "import playwright" 2>/dev/null; then
   sudo "$VPY" -m playwright install-deps chromium || \
     printf "   ${c_r}playwright system deps failed (install manually if browser login errors)${c_0}\n"
   "$VPY" -m playwright install chromium && printf "   ${c_g}chromium installed${c_0}\n"

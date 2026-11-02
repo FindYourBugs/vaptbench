@@ -10,6 +10,7 @@ A verifier takes a `send` callable bound to the target's scope:
       result = {ok, blocked, status, len, headers, text, identity, reason}
 and returns a list of finding dicts.
 """
+import re
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 # Unique, benign canaries.
@@ -224,29 +225,74 @@ def check_error_sqli(send, url):
     return out
 
 
-SENSITIVE_PATHS = {
-    "/.git/HEAD": "ref:", "/.env": "=", "/.DS_Store": "Bud1",
-    "/server-status": "Apache Server Status", "/phpinfo.php": "phpinfo()",
-    "/.svn/entries": "", "/WEB-INF/web.xml": "<web-app",
+# Each path maps to a validator that must recognise the file's ACTUAL format.
+# Weak substring signatures (e.g. "=" or "") match an SPA's index.html and
+# produce false positives, so every validator below is format-specific and all
+# reject HTML (checked separately before the validator runs).
+SENSITIVE_FILES = {
+    "/.git/HEAD":       lambda b: b.lstrip()[:5].startswith("ref:") and len(b) < 200,
+    "/.git/config":     lambda b: "[core]" in b and "repositoryformatversion" in b.lower(),
+    "/.env":            lambda b: bool(re.search(r'(?m)^[A-Z][A-Z0-9_]{2,}=', b)),
+    "/.DS_Store":       lambda b: "Bud1" in b[:64],
+    "/server-status":   lambda b: "Apache Server Status" in b,
+    "/phpinfo.php":     lambda b: "phpinfo()" in b or "PHP Version" in b,
+    "/.svn/entries":    lambda b: bool(re.match(r'^\s*\d+\s', b)) or b[:40].lower().startswith("<?xml"),
+    "/.svn/wc.db":      lambda b: b[:15].startswith("SQLite format"),
+    "/WEB-INF/web.xml": lambda b: "<web-app" in b.lower(),
+    "/.aws/credentials": lambda b: "aws_access_key_id" in b.lower(),
+    "/config.php~":     lambda b: "<?php" in b,
+    "/.htpasswd":       lambda b: bool(re.search(r'(?m)^[^:\s]+:\$?[^\s:]{3,}', b)) and "<" not in b[:20],
 }
+
+
+def _header(result, name):
+    for k, v in (result.get("headers") or {}).items():
+        if k.lower() == name.lower():
+            return v or ""
+    return ""
+
+
+def _is_html_page(result):
+    """True if the response is an HTML page (e.g. an SPA app shell), not a raw file."""
+    if "text/html" in _header(result, "content-type").lower():
+        return True
+    head = (result.get("text") or "")[:600].lower()
+    return "<!doctype html" in head or "<html" in head
 
 
 def check_exposed_files(send, base_url):
     out = []
     base = base_url.rstrip("/")
-    for path, sig in SENSITIVE_PATHS.items():
+
+    # Learn the catch-all: many SPAs return 200 + index.html for ANY unknown
+    # path (client-side routing). Capture that body so we can reject matches.
+    probe = send("GET", base + "/vaptbench-nope-zzqx9k7w")
+    catch_body = (probe.get("text") or "") if (probe.get("ok") and probe.get("status") == 200) else ""
+
+    for path, valid in SENSITIVE_FILES.items():
         r = send("GET", base + path)
         if not r.get("ok") or r.get("status") != 200:
             continue
         body = r.get("text") or ""
-        if sig and sig not in body:
+        # 1) an HTML page is the app, not the file -> reject
+        if _is_html_page(r):
+            continue
+        # 2) identical to the catch-all 200 body -> reject
+        if catch_body and (body == catch_body or
+                           abs(len(body) - len(catch_body)) < 32 and body[:300] == catch_body[:300]):
+            continue
+        # 3) must look like the real file format
+        try:
+            if not valid(body):
+                continue
+        except Exception:
             continue
         req, resp = _poc("GET", base + path, r)
         out.append(dict(title=f"Exposed sensitive file: {path}",
                         vuln_class="hunt-source-leak", severity="high",
                         cvss="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                         confidence="confirmed",
-                        description=f"{base + path} is publicly accessible (HTTP 200).",
-                        steps=f"GET {base + path} → 200 with sensitive content.",
+                        description=f"{base + path} is publicly accessible (HTTP 200) and its body matches the expected file format.",
+                        steps=f"GET {base + path} → 200 with the actual file contents (not the SPA/app page).",
                         poc_request=req, poc_response=resp))
     return out

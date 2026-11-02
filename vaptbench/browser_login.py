@@ -43,6 +43,21 @@ def available():
         return False
 
 
+def error_hint(err):
+    """Turn a giant Playwright launch dump into one short, actionable line."""
+    s = str(err)
+    low = s.lower()
+    if "libnspr4" in low or "libnss3" in low or "error while loading shared libraries" in low \
+            or "install-deps" in low or "host system is missing dependencies" in low:
+        return ("headless browser is missing system libraries — run: "
+                "sudo playwright install-deps chromium  "
+                "(or: sudo apt install libnss3 libnspr4 libasound2t64)")
+    if "executable doesn't exist" in low or ("looks like playwright" in low) \
+            or ("chromium" in low and "install" in low and "run" in low):
+        return "Chromium not installed for Playwright — run: playwright install chromium"
+    return (s.splitlines()[0].strip() or s[:160])[:200]
+
+
 def _first(page, selectors, timeout=0):
     for sel in selectors:
         try:
@@ -157,7 +172,7 @@ def login(identity, scope_rules):
             bits = [f"{len(cookies)} cookie(s)"] + (["bearer token"] if token else [])
             return True, "browser login ok: " + ", ".join(bits)
     except Exception as e:
-        return False, f"browser login error: {e}"
+        return False, f"browser login failed — {error_hint(e)}"
 
 
 def _find_token(store):

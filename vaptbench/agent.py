@@ -123,7 +123,9 @@ _SYSTEM = (
     "vulnerabilities on an AUTHORISED target. You never claim a vulnerability "
     "yourself — deterministic verifiers confirm findings. Prioritise endpoints "
     "with query parameters, auth flows, and anything that looks like it handles "
-    "user data or object IDs. Avoid repeating actions on the same URL."
+    "user data or object IDs. Avoid repeating actions on the same URL. Do NOT "
+    "waste steps injecting or advanced-testing static assets (.js/.css/images) — "
+    "they have no server-side surface; at most probe one once for leaked secrets."
 )
 
 
@@ -240,6 +242,9 @@ def _test(ctx, url, classes):
 def _inject(ctx, url):
     if not _in_scope_url(ctx, url):
         return "url not in scope / unknown"
+    from .engine import is_static_asset
+    if is_static_asset(url):
+        return "skipped — static asset (JS/CSS/image) has no server-side injection surface"
     ctx.injected.add(url)
     hits = []
     for fn in (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
@@ -255,6 +260,9 @@ def _inject(ctx, url):
 def _advanced(ctx, url):
     if not _in_scope_url(ctx, url):
         return "url not in scope / unknown"
+    from .engine import is_static_asset
+    if is_static_asset(url):
+        return "skipped — static asset (JS/CSS/image) is not an SSRF/stored-XSS surface"
     import time
     import uuid
     from .models import OobHit

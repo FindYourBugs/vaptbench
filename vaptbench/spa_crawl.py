@@ -163,7 +163,8 @@ def capture(base_url, scope_rules, identity=None, max_urls=80, log=None):
 
             browser.close()
     except Exception as e:
-        _l(f"runtime API capture error: {e}")
+        from .browser_login import error_hint
+        _l(f"runtime API capture unavailable — {error_hint(e)}")
         return [seen[k] for k in order][:max_urls]
 
     results = [seen[k] for k in order][:max_urls]

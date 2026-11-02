@@ -40,6 +40,15 @@ OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
 
 MAX_ENDPOINTS = 40
 LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\'#?\s][^"\']*)["\']', re.I)
+ASSET_RE = re.compile(
+    r"\.(?:js|mjs|css|map|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|mp4|webm)(?:$|\?)", re.I)
+
+
+def is_static_asset(url):
+    """Static resources (JS/CSS/images/fonts) are public by design — not an
+    injection or access-control surface. Used to suppress false positives and
+    stop the agent wasting steps on them."""
+    return bool(ASSET_RE.search(url or ""))
 
 
 # --------------------------------------------------------------------------
@@ -545,12 +554,22 @@ def _access_control(run, send, endpoints, identities, seen):
     Deterministic signal: an unauthenticated request getting 200 with a body
     comparable to an authenticated one on a non-root endpoint = possible broken
     access control. Marked needs-review (ownership can't be proven headless).
+
+    Only runs when at least one role actually logged in — otherwise every role
+    is effectively unauthenticated and the comparison is meaningless (which is
+    what produced the bogus flags when SPA login failed).
     """
-    roles = [(i.role, i) for i in identities] + [("unauth", None)]
+    authed = [i for i in identities if getattr(i, "session_blob", None)]
+    if not authed:
+        _log(run, "info", "access",
+             "no authenticated role (logins failed or none supplied) — "
+             "skipping access-control matrix (nothing to compare)")
+        return
+    roles = [(i.role, i) for i in authed] + [("unauth", None)]
     for url in endpoints[:20]:
         if run.stop_requested:
             break
-        if urlparse(url).path in ("", "/"):
+        if urlparse(url).path in ("", "/") or is_static_asset(url):
             continue
         results = {}
         for role, ident in roles:

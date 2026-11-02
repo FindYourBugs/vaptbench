@@ -103,13 +103,39 @@ def _same_origin(a, b):
     return urlparse(a).hostname == urlparse(b).hostname
 
 
-def _discover(base_url, base_html, scope_rules, run):
-    """Build an endpoint list: links in the base page + katana crawl + known reqs."""
-    found = {base_url}
-    for m in LINK_RE.findall(base_html or ""):
-        u = urljoin(base_url, m)
+def _page_links(html, page_url, base_url):
+    """In-scope same-origin links + synthesised GET-form URLs from one page."""
+    from . import forms as forms_mod
+    out = set()
+    for m in LINK_RE.findall(html or ""):
+        u = urljoin(page_url, m)
         if u.startswith("http") and _same_origin(u, base_url):
-            found.add(u.split("#")[0])
+            out.add(u.split("#")[0])
+    for u in forms_mod.get_form_urls(html, page_url):   # form params = injectable surface
+        if _same_origin(u, base_url):
+            out.add(u)
+    return out
+
+
+def _discover(base_url, base_html, scope_rules, run, send=None, primary=None):
+    """Build an endpoint list: links + FORM parameters in the base page, one
+    level of authenticated crawl, katana, and known captured requests."""
+    found = {base_url}
+    found |= _page_links(base_html, base_url, base_url)
+
+    # One level deeper, authenticated: the entry page (login, landing) rarely
+    # links straight to the injectable pages — fetch the pages it does link to
+    # (as the logged-in user) and harvest THEIR links + form parameters. This is
+    # what gets us from login.php/index to /vulnerabilities/sqli/?id=... .
+    if send is not None:
+        frontier = [u for u in list(found) if u != base_url and not is_static_asset(u)][:15]
+        for u in frontier:
+            if run.stop_requested:
+                break
+            r = send("GET", u, identity=primary)
+            body = r.get("text") or ""
+            if r.get("ok") and ("<html" in body[:4000].lower() or "<form" in body.lower()):
+                found |= _page_links(body, u, base_url)
 
     # Light katana crawl if available (depth 1); non-fatal if missing.
     res = run_tool("katana", base_url, scope_rules)
@@ -213,8 +239,11 @@ def _run(app, run_id):
                 _log(run, "error", "recon", f"base unreachable: {base.get('reason')}")
                 run.status = "error"; run.finished = datetime.utcnow(); db.session.commit()
                 return
-            endpoints = _discover(t.base_url, base.get("text", ""), scope, run)
-            _log(run, "info", "recon", f"{len(endpoints)} endpoint(s) in scope to test")
+            endpoints = _discover(t.base_url, base.get("text", ""), scope, run,
+                                  send=send, primary=primary)
+            withparam = sum(1 for u in endpoints if urlparse(u).query)
+            _log(run, "info", "recon",
+                 f"{len(endpoints)} endpoint(s) in scope to test ({withparam} with parameters)")
 
             # SPA API discovery: capture the real XHR/fetch backend routes that a
             # JS app talks to (invisible in server HTML). This is the actual

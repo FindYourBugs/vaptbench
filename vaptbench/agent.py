@@ -204,19 +204,21 @@ def _probe(ctx, url):
 
 
 def _crawl(ctx, url):
-    """Add in-scope endpoints linked from url (lazy-imports engine helpers)."""
-    from .engine import LINK_RE, _same_origin
-    from urllib.parse import urljoin
-    r = ctx.send("GET", url or (ctx.endpoints[0] if ctx.endpoints else ""), identity=ctx.primary)
+    """Add in-scope endpoints (links + FORM parameters) linked from url."""
+    from .engine import _page_links
+    target = url or (ctx.endpoints[0] if ctx.endpoints else "")
+    r = ctx.send("GET", target, identity=ctx.primary)
     if not r.get("ok"):
         return f"failed: {r.get('reason')}"
-    added = 0
-    for m in LINK_RE.findall(r.get("text") or ""):
-        u = urljoin(url, m).split("#")[0]
-        if u.startswith("http") and _same_origin(u, url) and u not in ctx.endpoints:
+    added = param_added = 0
+    for u in _page_links(r.get("text") or "", target, target):
+        if u not in ctx.endpoints:
             ctx.endpoints.append(u)
             added += 1
-    return f"crawled, +{added} endpoint(s) (total {len(ctx.endpoints)})"
+            if urlparse(u).query:
+                param_added += 1
+    extra = f", {param_added} with params" if param_added else ""
+    return f"crawled, +{added} endpoint(s){extra} (total {len(ctx.endpoints)})"
 
 
 def _test(ctx, url, classes):

@@ -15,8 +15,18 @@ import os
 import sys
 import time
 import argparse
+import warnings
 from datetime import datetime
 from urllib.parse import urlparse
+
+# Targets often have self-signed / proxied TLS; we verify=False deliberately.
+# Silence the resulting per-request urllib3 warning so the feed stays readable.
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 # ANSI colours (disabled if not a tty)
 _TTY = sys.stdout.isatty()

@@ -19,31 +19,60 @@ FALLBACK_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 389, 443, 445,
                   6379, 8080, 8443, 9200, 11211, 27017]
 
 
+# Ports used for the quick TCP reachability probe (tells "down" from "no ports").
+_PROBE_PORTS = [443, 80, 22, 445, 3389, 8080, 8443, 8444, 53, 3306, 5000, 9200]
+
+
 def available():
     return shutil.which("nmap") is not None
 
 
-def scan_host(host, top_ports=1000, udp=False, timeout=600, log=None):
-    """Return {'host', 'up', 'services':[{port,proto,state,name,product,version,
-    extrainfo}]}. Uses nmap -sT -sV; falls back to a socket connect-scan."""
+def reachable(host, timeout=1.0):
+    """Quick liveness probe: True if any common TCP port accepts a connection
+    (a RST/refused also proves the host is up). Distinguishes an unreachable
+    host from one that's up with nothing open in the scanned range."""
+    for port in _PROBE_PORTS:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except ConnectionRefusedError:
+            return True            # refused = host is alive, port just closed
+        except (OSError, socket.timeout):
+            continue
+    return False
+
+
+def _port_args(ports):
+    """Translate a ports spec into nmap args. 'topN' -> --top-ports N;
+    'all'/'-p-'/'full' -> -p-; anything else is an explicit nmap -p spec."""
+    ports = (ports or "top1000").strip().lower()
+    if ports in ("all", "-p-", "full", "allports"):
+        return ["-p-"]
+    if ports.startswith("top"):
+        n = ports[3:] or "1000"
+        return ["--top-ports", n if n.isdigit() else "1000"]
+    return ["-p", ports]
+
+
+def scan_host(host, ports="top1000", udp=False, timeout=900, log=None):
+    """Return {'host', 'up', 'services':[...]}. Uses nmap -sT -sV; falls back to a
+    socket connect-scan. `ports` is a spec: 'top1000', 'all', or '22,80,8443'."""
     def _l(msg):
         if log:
             log(msg)
 
     if available():
-        return _nmap(host, top_ports, udp, timeout, _l)
+        return _nmap(host, ports, udp, timeout, _l)
     _l("nmap not installed — using built-in TCP connect-scan (no version detection)")
     return _fallback(host)
 
 
-def _nmap(host, top_ports, udp, timeout, _l):
-    cmd = ["nmap", "-sT", "-sV", "-Pn", "--open", "-T4",
-           "--top-ports", str(top_ports), "-oX", "-", host]
+def _nmap(host, ports, udp, timeout, _l):
+    cmd = ["nmap", "-sT", "-sV", "-Pn", "--open", "-T4"] + _port_args(ports) + \
+          ["-oX", "-", host]
     if udp:
-        # best-effort UDP (will no-op without root); keep it small & fast
         cmd = ["nmap", "-sT", "-sU", "-sV", "-Pn", "--open", "-T4",
-               "--top-ports", str(top_ports), "-p", f"U:{UDP_PORTS},T:1-{top_ports}",
-               "-oX", "-", host]
+               "-p", f"U:{UDP_PORTS},T:1-1000", "-oX", "-", host]
     _l(f"nmap {' '.join(cmd[1:])}")
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

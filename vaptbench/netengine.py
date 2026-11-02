@@ -21,7 +21,8 @@ from . import engine as web_engine   # reuse _add_finding / _log / writeup / cri
 
 NUCLEI = os.environ.get("VAPT_NUCLEI", "1") != "0" and shutil.which("nuclei")
 CRITIC_MODE = web_engine.CRITIC_MODE
-TOP_PORTS = int(os.environ.get("VAPT_NET_PORTS", "1000"))
+PORTS_SPEC = os.environ.get("VAPT_NET_PORTS_SPEC", "") or \
+    ("top" + os.environ.get("VAPT_NET_PORTS", "1000"))
 
 
 def start_run(app, target_id):
@@ -50,10 +51,18 @@ def _run(app, run_id):
             _log(run, "info", "start", f"Autonomous NETWORK VAPT on {target}")
 
             # --- Phase 1: discovery + service/version scan -----------------
-            _log(run, "info", "recon", f"Scanning {target} (top {TOP_PORTS} ports, service detection)...")
+            _log(run, "info", "recon", f"Scanning {target} (ports: {PORTS_SPEC}, service detection)...")
             if not netscan.available():
                 _log(run, "warn", "recon", "nmap not installed — using built-in connect-scan (no versions)")
-            result = netscan.scan_host(target, top_ports=TOP_PORTS,
+            # single-host reachability probe (CIDR scans skip this)
+            single = "/" not in target
+            if single and not netscan.reachable(target):
+                _log(run, "warn", "recon",
+                     f"{target} did not respond on common ports — host may be down, firewalled, "
+                     f"or unreachable from this machine. In WSL, LAN IPs aren't always directly "
+                     f"routable: verify with `ping {target}` / `nc -vz {target} <port>` from this "
+                     f"shell. Scanning anyway (-Pn)...")
+            result = netscan.scan_host(target, ports=PORTS_SPEC,
                                        log=lambda m: _log(run, "info", "recon", m))
             services = result.get("services", [])
             # group by host, scope-check each host
@@ -65,7 +74,14 @@ def _run(app, run_id):
                     continue
                 by_host.setdefault(h, []).append(svc)
             if not by_host:
-                _log(run, "warn", "recon", "no open, in-scope services found")
+                if single and not netscan.reachable(target):
+                    _log(run, "warn", "recon",
+                         "no services — host appears DOWN/unreachable from here (see note above). "
+                         "Run from a host on the same network segment, or check routing/firewall.")
+                else:
+                    _log(run, "warn", "recon",
+                         "host is UP but no open ports in the scanned range — try a wider scan: "
+                         "--ports all  (full 1-65535), or --ports 8000-9000 for a custom range.")
             total_svc = sum(len(v) for v in by_host.values())
             _log(run, "info", "recon",
                  f"{len(by_host)} host(s) up, {total_svc} open in-scope service(s)")

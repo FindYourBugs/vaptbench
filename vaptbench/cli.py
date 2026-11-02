@@ -237,6 +237,9 @@ def main(argv=None):
                     help="auth type: auto|form|bearer|cookie|basic (default auto)")
     ap.add_argument("--mode", default="auto", choices=["auto", "web", "network"],
                     help="auto (detect from target) | web | network (infra VAPT by IP/CIDR)")
+    ap.add_argument("--ports", default="", metavar="SPEC",
+                    help="network mode port spec: top1000 (default) | all | "
+                         "a range/list like 1-65535 or 22,80,8443")
     ap.add_argument("--no-agent", action="store_true",
                     help="disable the LLM agent; run the deterministic sweep only")
     ap.add_argument("--report", default="", metavar="PATH",
@@ -270,6 +273,8 @@ def main(argv=None):
                      "https://shop.example.com/  — or an IP/CIDR with --mode network")
         args.target = norm
 
+    if args.ports:
+        os.environ["VAPT_NET_PORTS_SPEC"] = args.ports
     if args.no_agent:
         os.environ["VAPT_AGENT"] = "0"
     if args.db:

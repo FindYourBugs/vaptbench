@@ -23,6 +23,7 @@ from .recon import run_tool
 from . import verifiers as V
 from . import verifiers2 as V2
 from . import verifiers3 as V3
+from . import verifiers_post as VP
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
@@ -49,6 +50,25 @@ def is_static_asset(url):
     injection or access-control surface. Used to suppress false positives and
     stop the agent wasting steps on them."""
     return bool(ASSET_RE.search(url or ""))
+
+
+# Paths that are public by design — never a "broken access control" finding.
+_PUBLIC_HINT = re.compile(
+    r"/(?:login|logout|signin|sign-in|signup|sign-up|register|home|index|about|"
+    r"help|contact|faq|terms|privacy|instructions?|readme|robots|sitemap|"
+    r"favicon|setup|phpinfo)\b", re.I)
+# Paths that, if exposed unauthenticated, ARE worth flagging even if identical.
+_SENSITIVE_HINT = re.compile(
+    r"/(?:admin|administrator|internal|private|config|manage|dashboard|console|"
+    r"account|users?|profile|settings|billing|invoice|order|report)\b", re.I)
+_LOGIN_MARKERS = re.compile(
+    r"""type=["']password["']|name=["'](?:pwd|pass|password|login|username)["']|"""
+    r"""please\s+log\s*in|sign\s*in\s+to|login\s*required|you\s+must\s+(?:be\s+)?log""", re.I)
+
+
+def _looks_like_login(body):
+    """True if a response body is really a login / auth-required page."""
+    return bool(_LOGIN_MARKERS.search((body or "")[:4000]))
 
 
 # --------------------------------------------------------------------------
@@ -117,11 +137,15 @@ def _page_links(html, page_url, base_url):
     return out
 
 
-def _discover(base_url, base_html, scope_rules, run, send=None, primary=None):
+def _discover(base_url, base_html, scope_rules, run, send=None, primary=None, post_forms=None):
     """Build an endpoint list: links + FORM parameters in the base page, one
-    level of authenticated crawl, katana, and known captured requests."""
+    level of authenticated crawl, katana, and known captured requests. POST
+    forms (for body injection) are appended to `post_forms` if provided."""
+    from . import forms as forms_mod
     found = {base_url}
     found |= _page_links(base_html, base_url, base_url)
+    if post_forms is not None:
+        post_forms += forms_mod.post_forms(base_html, base_url)
 
     # One level deeper, authenticated: the entry page (login, landing) rarely
     # links straight to the injectable pages — fetch the pages it does link to
@@ -136,6 +160,8 @@ def _discover(base_url, base_html, scope_rules, run, send=None, primary=None):
             body = r.get("text") or ""
             if r.get("ok") and ("<html" in body[:4000].lower() or "<form" in body.lower()):
                 found |= _page_links(body, u, base_url)
+                if post_forms is not None:
+                    post_forms += forms_mod.post_forms(body, u)
 
     # Light katana crawl if available (depth 1); non-fatal if missing.
     res = run_tool("katana", base_url, scope_rules)
@@ -239,11 +265,13 @@ def _run(app, run_id):
                 _log(run, "error", "recon", f"base unreachable: {base.get('reason')}")
                 run.status = "error"; run.finished = datetime.utcnow(); db.session.commit()
                 return
+            post_forms = []
             endpoints = _discover(t.base_url, base.get("text", ""), scope, run,
-                                  send=send, primary=primary)
+                                  send=send, primary=primary, post_forms=post_forms)
             withparam = sum(1 for u in endpoints if urlparse(u).query)
             _log(run, "info", "recon",
-                 f"{len(endpoints)} endpoint(s) in scope to test ({withparam} with parameters)")
+                 f"{len(endpoints)} endpoint(s) in scope to test ({withparam} with parameters, "
+                 f"{len(post_forms)} POST form(s))")
 
             # SPA API discovery: capture the real XHR/fetch backend routes that a
             # JS app talks to (invisible in server HTML). This is the actual
@@ -286,6 +314,10 @@ def _run(app, run_id):
                 _mopup(run, send, endpoints, seen, primary, ctx)
             else:
                 _deterministic_sweep(run, send, t, endpoints, identities, seen, primary)
+
+            # --- Phase 3d: POST-form injection -----------------------------
+            if not run.stop_requested:
+                _post_inject_phase(run, send, post_forms, seen, t.base_url)
 
             # --- Phase 4: access-control matrix ----------------------------
             if len(identities) >= 1 and not run.stop_requested:
@@ -347,6 +379,39 @@ def _mopup(run, send, endpoints, seen, primary, ctx):
                         _add_finding(run, seen, f)
                 except Exception as e:
                     _log(run, "warn", "inject", f"{fn.__name__} error: {e}")
+        db.session.commit()
+
+
+def _post_inject_phase(run, send, post_forms, seen, base_url):
+    """Inject into discovered POST forms (SQLi / XSS / command injection) — the
+    surface GET-param testing can't reach (login, search, DVWA command-exec)."""
+    if not post_forms:
+        return
+    base_host = urlparse(base_url).hostname
+    done, tested = set(), 0
+    uniq = []
+    for form in post_forms:
+        key = (form["action"], tuple(sorted(form.get("inputs", {}))))
+        if key in done or not form.get("inputs"):
+            continue
+        if urlparse(form["action"]).hostname != base_host:
+            continue
+        done.add(key)
+        uniq.append(form)
+    if not uniq:
+        return
+    _log(run, "info", "inject", f"POST-form injection ({len(uniq)} unique form(s))...")
+    for form in uniq[:MAX_INJECT_ENDPOINTS]:
+        if run.stop_requested:
+            break
+        tested += 1
+        _log(run, "test", "inject",
+             f"POST {urlparse(form['action']).path} fields={list(form['inputs'])}")
+        try:
+            for f in VP.check_post_form(send, form):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "inject", f"post-inject error on {form['action']}: {e}")
         db.session.commit()
 
 
@@ -531,6 +596,10 @@ def _chain_phase(run, seen):
         members = [f for f in confirmed if f.vuln_class in classes]
         if not members:
             continue
+        # Multi-class chains must have ALL their classes confirmed, not just one,
+        # or we emit a misleading "A + B" chain from A alone.
+        if len(classes) > 1 and len({m.vuln_class for m in members}) < len(classes):
+            continue
         mtitles = "; ".join(f"[{m.severity}] {m.title}" for m in members)
         desc = narrative + "\n\nBased on confirmed findings: " + mtitles
         if ai_ok:
@@ -627,27 +696,39 @@ def _access_control(run, send, endpoints, identities, seen):
              "no authenticated role (logins failed or none supplied) — "
              "skipping access-control matrix (nothing to compare)")
         return
-    roles = [(i.role, i) for i in authed] + [("unauth", None)]
+    primary = authed[0]
     for url in endpoints[:20]:
         if run.stop_requested:
             break
-        if urlparse(url).path in ("", "/") or is_static_asset(url):
+        path = urlparse(url).path
+        if path in ("", "/") or is_static_asset(url) or _PUBLIC_HINT.search(path):
             continue
-        results = {}
-        for role, ident in roles:
-            r = send("GET", url, identity=ident)
-            results[role] = (r.get("status"), r.get("len")) if r.get("ok") else (None, None)
-        unauth = results.get("unauth")
-        authed = [v for k, v in results.items() if k != "unauth" and v[0] == 200]
-        if unauth and unauth[0] == 200 and authed:
-            # unauth sees a 200 that an authed role also sees -> maybe no authz
-            matrix = ", ".join(f"{k}={v[0]}/{v[1]}" for k, v in results.items())
-            _add_finding(run, seen, dict(
-                title=f"Possible broken access control: {urlparse(url).path}",
-                vuln_class="hunt-idor", severity="medium", cvss="",
-                confidence="needs-review",
-                description=f"{url} returns 200 to an UNAUTHENTICATED request as well as to "
-                            f"authenticated roles. Verify whether it should require auth / "
-                            f"whether it exposes another user's data.\nMatrix: {matrix}",
-                steps=f"GET {url} with and without a session; compare.",
-                poc_request=f"GET {url}", poc_response=f"role matrix: {matrix}"))
+        a = send("GET", url, identity=primary)       # authenticated view
+        u = send("GET", url, identity=None)          # unauthenticated view
+        if not (a.get("ok") and u.get("ok")):
+            continue
+        if a.get("status") != 200 or u.get("status") != 200:
+            continue                                 # unauth denied/redirected = properly gated
+        ab, ub = a.get("text") or "", u.get("text") or ""
+        if len(ab) < 200:
+            continue
+        if _looks_like_login(ub):
+            continue                                 # unauth got the LOGIN page, not the content
+        ratio = len(ub) / max(len(ab), 1)
+        if not (0.85 <= ratio <= 1.18):
+            continue                                 # different content = served differently per auth
+        identical = ub.strip() == ab.strip()
+        if identical and not _SENSITIVE_HINT.search(path):
+            continue                                 # same for everyone = public page, not a finding
+        _add_finding(run, seen, dict(
+            title=f"Possible broken access control: {path}",
+            vuln_class="hunt-idor", severity="medium", cvss="",
+            confidence="needs-review",
+            description=f"{url} returns the SAME substantial content ({len(ub)}B unauth vs "
+                        f"{len(ab)}B authenticated, {ratio:.0%} match) to an UNAUTHENTICATED "
+                        f"request as to the '{primary.role}' session — the unauthenticated "
+                        f"response is NOT a login page. Verify whether this endpoint should "
+                        f"require authentication or exposes another user's data.",
+            steps=f"GET {url} with a valid session, then again with no session; compare bodies.",
+            poc_request=f"GET {url}  (no Cookie/Authorization header)",
+            poc_response=(ub[:600])))

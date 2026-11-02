@@ -88,6 +88,24 @@ def _banner(title):
     return "\n" + _c("1;36", "━━ " + title + " " + "━" * pad)
 
 
+def _is_ip_target(s):
+    """True if s is an IP address or CIDR (optionally scheme/port-decorated)."""
+    import ipaddress
+    s = (s or "").strip()
+    s = s.split("://", 1)[-1].split("/")[0] if "://" in s else s
+    bare = s.split("/")[0].split(":")[0]       # strip CIDR/port for the address test
+    try:
+        ipaddress.ip_address(bare)
+        return True
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_network(s, strict=False)   # CIDR like 10.0.0.0/24
+        return True
+    except ValueError:
+        return False
+
+
 def _norm_url(s):
     """Return a normalised http(s) URL, or '' if the text isn't a URL/host."""
     s = (s or "").strip()
@@ -217,6 +235,8 @@ def main(argv=None):
     ap.add_argument("--login-url", default="", help="login page URL (form/auto auth)")
     ap.add_argument("--auth", default="auto",
                     help="auth type: auto|form|bearer|cookie|basic (default auto)")
+    ap.add_argument("--mode", default="auto", choices=["auto", "web", "network"],
+                    help="auto (detect from target) | web | network (infra VAPT by IP/CIDR)")
     ap.add_argument("--no-agent", action="store_true",
                     help="disable the LLM agent; run the deterministic sweep only")
     ap.add_argument("--report", default="", metavar="PATH",
@@ -238,11 +258,16 @@ def main(argv=None):
             _interactive_setup(args)
         if not args.target:
             ap.error("a target URL is required (pass it as an argument or run interactively)")
+
+    # Decide web vs network. IP/CIDR targets => network; otherwise validate URL.
+    net_mode = args.mode == "network" or (args.mode == "auto" and _is_ip_target(args.target))
+    if net_mode:
+        args.target = args.target.split("://", 1)[-1].rstrip("/")   # keep raw IP/CIDR[:port]
     else:
         norm = _norm_url(args.target)
         if not norm:
-            ap.error(f"target must be a URL (got {args.target!r}); "
-                     "e.g. https://shop.example.com/")
+            ap.error(f"target must be a URL (got {args.target!r}); e.g. "
+                     "https://shop.example.com/  — or an IP/CIDR with --mode network")
         args.target = norm
 
     if args.no_agent:
@@ -256,10 +281,12 @@ def main(argv=None):
     from vaptbench import create_app
     from vaptbench.models import db, Engagement, Target, Identity
     from vaptbench import engine, ai as ai_mod
+    if net_mode:
+        from vaptbench import netengine
 
     app = create_app()
     with app.app_context():
-        host = urlparse(args.target).hostname or args.target
+        host = (urlparse(args.target).hostname or args.target) if not net_mode else args.target
         # The target host is always in scope so the base URL is reachable, even
         # when the user also supplied explicit scope rules.
         scope_list = list(args.scope)
@@ -285,7 +312,9 @@ def main(argv=None):
         tid = t.id
 
         ai_ok, ai_why = ai_mod.available()
-        if args.no_agent:
+        if net_mode:
+            mode = "NETWORK · nmap + service verifiers" + ("" if ai_ok else "  (AI offline)")
+        elif args.no_agent:
             mode = "deterministic (agent disabled)"
         elif ai_ok:
             mode = f"AGENT · {ai_mod._cfg()['ollama_model']}"
@@ -302,7 +331,7 @@ def main(argv=None):
               f"{_c('1;35','▸')} agent reasoning   {_c('34','→')} action/result   "
               f"{_c('32','✓')} proven   {_c('33','?')} needs review")
 
-        rid = engine.start_run(app, tid)
+        rid = (netengine.start_run(app, tid) if net_mode else engine.start_run(app, tid))
         try:
             _follow(app, rid)
         except KeyboardInterrupt:

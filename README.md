@@ -55,6 +55,26 @@ python vapt.py https://target/ --report out.pdf \
 
 Branding flags: `--company`, `--tester`, `--client`, `--logo`.
 
+## Network / infrastructure VAPT (by IP or CIDR)
+Give it an IP or range and it runs a full network assessment — not just a port
+scan:
+```bash
+python vapt.py 10.0.0.5 --mode network --report infra.pdf
+python vapt.py 192.168.1.0/24 --mode network        # whole subnet
+python vapt.py 10.0.0.5                              # IP auto-detected -> network mode
+```
+Phases: **discovery + service/version scan** (nmap, with a built-in connect-scan
+fallback) → **per-service verification** (proof-only) → **nuclei** network/ssl
+templates → AI write-up + critic → the same branded report.
+
+Service verifiers (wave 1, each emits a finding only when proven): weak TLS
+protocols / expired / self-signed certs, anonymous FTP, Telnet (cleartext),
+SMTP open-relay & VRFY user-enum, DNS version disclosure, SMB null-session share
+enumeration, SNMP default community, and unauthenticated Redis / MongoDB /
+Memcached / Elasticsearch. Missing tools degrade gracefully. Scope accepts
+IP/CIDR rules (deny-wins, default-deny) — authorised targets only.
+`VAPT_NET_PORTS` sets the nmap top-ports count; `VAPT_NUCLEI=0` disables nuclei.
+
 ## AI brain (local-first, hybrid-ready)
 ```bash
 # local (default) — on the Windows host, reachable from WSL:

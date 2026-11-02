@@ -7,6 +7,7 @@ Rules, one per line:
     !admin.example.com     deny (wins over any allow)
 """
 import fnmatch
+import ipaddress
 from urllib.parse import urlparse
 
 
@@ -29,9 +30,25 @@ def parse_rules(text):
     return allows, denies
 
 
+def _cidr_match(rule, host):
+    """True if `rule` is an IP network/address and `host` is an IP inside it.
+    Lets network scope rules like 10.0.0.0/24 or 192.168.1.5 authorise targets."""
+    try:
+        net = ipaddress.ip_network(rule.strip(), strict=False)
+    except ValueError:
+        return False
+    try:
+        return ipaddress.ip_address(host) in net
+    except ValueError:
+        return False
+
+
 def _matches(rule, url):
     host = _host(url)
     rhost = _host(rule)
+    # IP / CIDR rules (network scope): match the target IP against the network.
+    if _cidr_match(rule, host):
+        return True
     # A rule containing a glob is matched strictly (lets you scope precise paths
     # or write path-level deny rules like !https://x.com/admin/*).
     if "*" in rule:

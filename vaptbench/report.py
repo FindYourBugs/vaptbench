@@ -41,6 +41,20 @@ CLASS_MAP = {
     "hunt-graphql":    ("CWE-16",   "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),
     "hunt-misc":       ("CWE-693",  "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),
     "chain":           ("-",        "-",                                    "Attack Chain"),
+    # network / infrastructure classes
+    "net-service":     ("-",        "-",                                    "Network Exposure"),
+    "net-tls":         ("CWE-326",  "A02:2021 – Cryptographic Failures",    "TLS / Transport Security"),
+    "net-ftp":         ("CWE-287",  "A07:2021 – Auth Failures",            "Network Service — FTP"),
+    "net-telnet":      ("CWE-319",  "A02:2021 – Cryptographic Failures",    "Cleartext Protocol"),
+    "net-smtp":        ("CWE-269",  "A05:2021 – Security Misconfiguration", "Network Service — SMTP"),
+    "net-dns":         ("CWE-200",  "A05:2021 – Security Misconfiguration", "Network Service — DNS"),
+    "net-smb":         ("CWE-287",  "A05:2021 – Security Misconfiguration", "Network Service — SMB"),
+    "net-snmp":        ("CWE-1392", "A05:2021 – Security Misconfiguration", "Network Service — SNMP"),
+    "net-redis":       ("CWE-306",  "A05:2021 – Security Misconfiguration", "Unauthenticated Datastore"),
+    "net-mongodb":     ("CWE-306",  "A05:2021 – Security Misconfiguration", "Unauthenticated Datastore"),
+    "net-memcached":   ("CWE-306",  "A05:2021 – Security Misconfiguration", "Unauthenticated Datastore"),
+    "net-elastic":     ("CWE-306",  "A05:2021 – Security Misconfiguration", "Unauthenticated Datastore"),
+    "net-nuclei":      ("-",        "-",                                    "Network Vulnerability"),
 }
 SLA = {"critical": "Within 7 days (emergency)", "high": "Within 15 days",
        "medium": "Within 30 days", "low": "Within 60 days", "info": "Next release cycle"}

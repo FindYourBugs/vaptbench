@@ -78,6 +78,19 @@ export VAPT_MODEL_PAYLOAD=whiterabbitneo     # payload crafting
 export VAPT_MODEL_WRITER=qwen3:14b           # report prose
 ```
 
+### Exploitation depth (read-only proof)
+After a verifier **confirms** a SQLi / command-injection / LFI, vaptbench safely
+extracts proof for the report — turning "the vuln exists" into "here is the data":
+- **SQLi** → DB engine, version, current user, current database (error-based,
+  auto-detects MySQL/Postgres/MSSQL)
+- **command injection** → output of read-only commands (`id`, `whoami`,
+  `hostname`, `uname -a`)
+- **LFI** → contents of standard system files (`/etc/passwd`, `/etc/hosts`)
+
+Read-only and non-destructive — no writes, deletes, or dumping of arbitrary user
+tables; only enough to make the finding undeniable. Authorised targets only.
+Toggle with `VAPT_EXPLOIT=0`.
+
 ### Critic pass (skeptical second opinion)
 After findings are gathered, a reasoning model reviews each one — real impact,
 false-positive risk, a better exploitation path, whether remediation is truly

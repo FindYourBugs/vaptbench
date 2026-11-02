@@ -29,12 +29,14 @@ from . import ai as ai_mod
 from . import agent as agent_mod
 from . import critic as critic_mod
 from . import spa_crawl
+from . import exploit as exploit_mod
 from .skills import load_playbook
 
 SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch API surface
 
 AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model is up
 CRITIC_MODE = os.environ.get("VAPT_CRITIC", "1") != "0"  # skeptical review of findings
+EXPLOIT_MODE = os.environ.get("VAPT_EXPLOIT", "1") != "0"  # extract read-only proof from confirmed findings
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -323,6 +325,10 @@ def _run(app, run_id):
             if len(identities) >= 1 and not run.stop_requested:
                 _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
                 _access_control(run, send, endpoints, identities, seen)
+
+            # --- Phase 4b: exploitation depth (read-only proof) ------------
+            if EXPLOIT_MODE and not run.stop_requested:
+                _exploit_phase(run, send, seen)
 
             # --- Phase 5: AI finding write-ups (best-effort) ---------------
             if not run.stop_requested:
@@ -618,6 +624,36 @@ def _chain_phase(run, seen):
             cvss="", confidence="needs-review", description=desc,
             steps="See the member findings referenced above.",
             poc_request="", poc_response=mtitles))
+
+
+def _exploit_phase(run, send, seen):
+    """For each CONFIRMED SQLi / command-injection / LFI, safely extract read-only
+    proof (DB version/user/db, command output, file contents) and append it to the
+    finding — turning 'exists' into 'here is the data' for the client report."""
+    targets = Finding.query.filter_by(run_id=run.id, confidence="confirmed").filter(
+        Finding.vuln_class.in_(["hunt-sqli", "hunt-cmd", "hunt-lfi"])).all()
+    if not targets:
+        return
+    _log(run, "info", "exploit",
+         f"Exploitation depth: extracting proof from {len(targets)} confirmed finding(s)...")
+    for fn in targets:
+        if run.stop_requested:
+            break
+        try:
+            res = exploit_mod.deepen(fn, send)
+        except Exception as e:
+            _log(run, "warn", "exploit", f"extract error on {fn.title}: {e}")
+            continue
+        if not res:
+            continue
+        summary, poc_req, poc_resp = res
+        fn.description = (fn.description or "") + "\n\n--- Exploitation (read-only proof) ---\n" + summary
+        # keep the detection PoC, add the exploitation PoC as the headline evidence
+        fn.poc_request = poc_req or fn.poc_request
+        if poc_resp:
+            fn.poc_response = poc_resp[:2000]
+        db.session.commit()
+        _log(run, "hit", "exploit", f"★ {summary[:110]}")
 
 
 def _writeup_phase(run):

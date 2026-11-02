@@ -24,8 +24,11 @@ python app.py          # web UI  -> http://127.0.0.1:8090
 ```
 
 ### CLI (headless, no browser)
-Drive the same autonomous engine from the terminal:
+Drive the same autonomous engine from the terminal. Launches with a banner +
+console header; run it with **no target** for an interactive setup that prompts
+for the URL, scope, and login roles (password masked):
 ```bash
+python vapt.py                        # interactive: prompts target/scope/roles
 python vapt.py https://shop.example.com/
 python vapt.py https://shop.example.com/ \
     --role userA:alice@example.com:Passw0rd \

@@ -61,9 +61,62 @@ MARK = {"info": ("·", "36"), "test": ("→", "34"), "hit": ("✓", "32"),
         "warn": ("!", "33"), "error": ("✗", "31")}
 
 
+VERSION = "0.8"
+
+_LOGO = r"""
+__      __     _____ _______ ____                  _
+\ \    / /\   |  __ \__   __|  _ \                | |
+ \ \  / /  \  | |__) | | |  | |_) | ___ _ __   ___| |__
+  \ \/ / /\ \ |  ___/  | |  |  _ < / _ \ '_ \ / __| '_ \
+   \  / ____ \| |      | |  | |_) |  __/ | | | (__| | | |
+    \/_/    \_\_|      |_|  |____/ \___|_| |_|\___|_| |_|
+"""
+
+
+def _logo():
+    """Print the launch banner (logo + tagline), HexStrike/PentestGPT style."""
+    print(_c("1;36", _LOGO.rstrip("\n")))
+    print(_c("1;37", "  Autonomous Web Application VAPT")
+          + _c("90", "   ·   local-first AI   ·   proven findings only"))
+    print(_c("90", f"  v{VERSION}   engine: AI agent + deterministic verifiers + critic")
+          + _c("1;33", "    ⚠ test only what you are authorised to test"))
+
+
 def _banner(title):
     pad = max(4, _WIDTH - len(title) - 4)
     return "\n" + _c("1;36", "━━ " + title + " " + "━" * pad)
+
+
+def _interactive_setup(args):
+    """Prompt for target + scope + optional login roles when none were given on
+    the command line — a console flow for testers who don't want flags."""
+    import getpass
+    print(_banner("NEW ENGAGEMENT"))
+    try:
+        args.target = input(_c("1;32", "  Target URL") +
+                             " (e.g. https://shop.example.com/) > ").strip()
+    except EOFError:
+        return
+    if not args.target:
+        return
+    sc = input("  Scope rules (space-separated, blank = target host only) > ").strip()
+    if sc:
+        args.scope = sc.split()
+    lu = input("  Login URL (blank = unauthenticated scan) > ").strip()
+    if lu:
+        args.login_url = lu
+        print(_c("90", "  Add role credentials — one per app role. Blank role name to finish."))
+        while True:
+            role = input("    role name (e.g. admin) > ").strip()
+            if not role:
+                break
+            user = input("    username / email   > ").strip()
+            try:
+                pw = getpass.getpass("    password            > ")
+            except Exception:
+                pw = input("    password            > ")
+            args.role.append(f"{role}:{user}:{pw}")
+            print(_c("32", f"    + role '{role}' added"))
 
 
 def _print_wrapped(mark_code, mark, body, indent="  "):
@@ -108,7 +161,9 @@ def _render(row):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="vaptbench", description="Autonomous web application VAPT (CLI).")
-    ap.add_argument("target", help="target base URL, e.g. https://shop.example.com/")
+    ap.add_argument("target", nargs="?", default="",
+                    help="target base URL, e.g. https://shop.example.com/ "
+                         "(omit for interactive setup)")
     ap.add_argument("--scope", action="append", default=[], metavar="RULE",
                     help="scope rule (repeatable); default = the target host")
     ap.add_argument("--role", action="append", default=[], metavar="ROLE:USER:PASS",
@@ -124,6 +179,13 @@ def main(argv=None):
     ap.add_argument("--authorization", default="CLI-authorized engagement",
                     help="authorization note recorded with the engagement")
     args = ap.parse_args(argv)
+
+    _logo()
+    if not args.target:
+        if sys.stdin.isatty():
+            _interactive_setup(args)
+        if not args.target:
+            ap.error("a target URL is required (pass it as an argument or run interactively)")
 
     if args.no_agent:
         os.environ["VAPT_AGENT"] = "0"
@@ -167,12 +229,15 @@ def main(argv=None):
         else:
             mode = f"deterministic (AI offline: {ai_why})"
 
-        print(_c("1", "\nVAPTBench — autonomous web VAPT"))
-        print(f"  target : {args.target}")
-        print(f"  scope  : {scope.replace(chr(10), ', ')}")
-        print(f"  roles  : {len(args.role)}  |  mode: {mode}")
-        print(f"  db     : {os.environ['VAPT_DB']}")
-        print("  " + "-" * 58)
+        print(_banner("ENGAGEMENT"))
+        print(f"  {_c('90','target')}   {_c('1;37', args.target)}")
+        print(f"  {_c('90','scope ')}   {scope.replace(chr(10), ', ')}")
+        print(f"  {_c('90','roles ')}   {len(args.role)}")
+        print(f"  {_c('90','mode  ')}   {_c('1;36', mode)}")
+        print(f"  {_c('90','db    ')}   {os.environ['VAPT_DB']}")
+        print(f"\n  {_c('90','legend')}   "
+              f"{_c('1;35','▸')} agent reasoning   {_c('34','→')} action/result   "
+              f"{_c('32','✓')} proven   {_c('33','?')} needs review")
 
         rid = engine.start_run(app, tid)
         try:

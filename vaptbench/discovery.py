@@ -263,6 +263,8 @@ def ingest_openapi(base_url, send, scope, log):
 
 # --------------------------------------------------------------- Postman
 _VAR_RE = re.compile(r"\{\{([^}]+)\}\}")
+_BASE_VARS = re.compile(
+    r"(?i)^(base[_-]?url|api[_-]?url|url|host|hostname|server|endpoint|gateway|origin)$")
 
 
 def _subst_vars(s, variables):
@@ -325,6 +327,135 @@ def _pm_body_op(method, url, body, variables):
         return None
     return {"method": method.upper(), "url": url, "content_type": "application/json",
             "body": doc, "fields": fields}
+
+
+def _pm_abs(url, variables):
+    """Resolve a Postman URL to an ABSOLUTE http(s) URL using only the collection's
+    own variables (no target fallback). Returns '' when the host can't be known."""
+    if isinstance(url, dict):
+        raw = url.get("raw")
+        if not raw:
+            host = url.get("host")
+            host = ".".join(host) if isinstance(host, list) else (host or "")
+            path = url.get("path")
+            path = "/".join(str(p) for p in path) if isinstance(path, list) else (path or "")
+            raw = f"{host}/{path}"
+    else:
+        raw = url
+    raw = _subst_vars(raw or "", variables)
+    if "{{" in raw or not raw.startswith("http"):
+        return ""
+    return raw.split("#")[0]
+
+
+def _one_auth(auth, variables):
+    """A Postman auth block -> a request header string ('Name: value'), or ''."""
+    if not isinstance(auth, dict):
+        return ""
+    t = (auth.get("type") or "").lower()
+
+    def val(listname, field):
+        for x in auth.get(listname) or []:
+            if isinstance(x, dict) and x.get("key") == field:
+                return _subst_vars(str(x.get("value", "")), variables)
+        return ""
+
+    if t == "bearer":
+        tok = val("bearer", "token")
+        if tok and "{{" not in tok:
+            return f"Authorization: Bearer {tok}"
+    elif t == "apikey":
+        name = val("apikey", "key") or "X-API-Key"
+        v = val("apikey", "value")
+        where = (val("apikey", "in") or "header").lower()
+        if v and "{{" not in v and where == "header":
+            return f"{name}: {v}"
+    elif t == "basic":
+        import base64
+        u, p = val("basic", "username"), val("basic", "password")
+        if u and "{{" not in u and "{{" not in p:
+            tok = base64.b64encode(f"{u}:{p}".encode()).decode()
+            return f"Authorization: Basic {tok}"
+    return ""
+
+
+def _pm_auth_header(coll, variables):
+    """Find an auth token in the collection: collection-level auth first, then the
+    first request-level auth block or Authorization header. Returns '' if none."""
+    h = _one_auth(coll.get("auth"), variables)
+    if h:
+        return h
+    found = [""]
+
+    def walk(items):
+        for it in items or []:
+            if found[0] or not isinstance(it, dict):
+                continue
+            if isinstance(it.get("item"), list):
+                walk(it["item"])
+                continue
+            req = it.get("request")
+            if not isinstance(req, dict):
+                continue
+            h = _one_auth(req.get("auth"), variables)
+            if h:
+                found[0] = h
+                return
+            for hd in req.get("header") or []:
+                if isinstance(hd, dict) and (hd.get("key", "").lower() == "authorization"):
+                    v = _subst_vars(str(hd.get("value", "")), variables)
+                    if v and "{{" not in v:
+                        found[0] = v if v.lower().startswith("authorization") else f"Authorization: {v}"
+                        return
+
+    walk(coll.get("item"))
+    return found[0]
+
+
+def postman_profile(path):
+    """Derive what's needed to scan a Postman collection on its own:
+    {base_url, hosts, auth_header, resolved, error}. `resolved` is False when the
+    collection references its host only through an undefined variable — then the
+    caller must ask the user for the target URL."""
+    try:
+        with open(path) as f:
+            coll = json.load(f)
+    except Exception as e:
+        return {"base_url": "", "hosts": [], "auth_header": "", "resolved": False,
+                "error": str(e)}
+    variables = _collect_vars(coll)
+    base = ""
+    for name, v in variables.items():
+        if _BASE_VARS.match(name or "") and str(v).startswith("http"):
+            base = str(v).rstrip("/") + "/"
+            break
+    hosts, first = set(), [None]
+
+    def walk(items):
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            if isinstance(it.get("item"), list):
+                walk(it["item"])
+                continue
+            req = it.get("request")
+            if not isinstance(req, dict):
+                continue
+            a = _pm_abs(req.get("url"), variables)
+            if a:
+                hosts.add(urlparse(a).netloc)
+                if first[0] is None:
+                    first[0] = a
+
+    walk(coll.get("item"))
+    if not base and first[0]:
+        pu = urlparse(first[0])
+        base = f"{pu.scheme}://{pu.netloc}/"
+    if base:
+        hosts.add(urlparse(base).netloc)
+    return {"base_url": base, "hosts": sorted(h for h in hosts if h),
+            "auth_header": _pm_auth_header(coll, variables),
+            "resolved": bool(base), "error": ""}
 
 
 def ingest_postman(path, base_url, scope, log):

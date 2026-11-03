@@ -218,7 +218,12 @@ runs on (default 6); `VAPT_CRAWL_DEPTH` / `VAPT_CRAWL_BUDGET` tune the crawl.
   `VAPT_POSTMAN`) and the engine parses a Postman v2.x export the same way it does
   OpenAPI: `{{variable}}` substitution, folder recursion, every request becomes a
   scope-checked testable URL, and raw-JSON bodies feed the JSON-body fuzzer. Clients
-  often hand over a Postman export instead of a spec.
+  often hand over a Postman export instead of a spec. **It can be run on its own** —
+  `python vapt.py --postman collection.json` derives the **target URL, scope hosts
+  and auth token** straight from the file (collection variables, absolute request
+  URLs, and the collection/request `auth` block or `Authorization` header). If the
+  collection's host is only an undefined variable (its value lived in a separate
+  environment export), it asks you to pass the base URL as the target.
 
 ### OpenAPI request-body fuzzing (Phase 3d2)
 When an OpenAPI/Swagger spec documents operations with a JSON request body, the

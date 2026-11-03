@@ -243,7 +243,8 @@ def main(argv=None):
     ap.add_argument("--no-agent", action="store_true",
                     help="disable the LLM agent; run the deterministic sweep only")
     ap.add_argument("--postman", default="", metavar="PATH",
-                    help="Postman collection (v2.x JSON) to ingest as extra API surface")
+                    help="Postman collection (v2.x JSON) to ingest as API surface; can be "
+                         "run alone (target/scope/token are derived from the file)")
     ap.add_argument("--ci", action="store_true",
                     help="CI gate: exit non-zero if confirmed findings meet --fail-on "
                          "(2 = gated findings, 1 = run error, 0 = clean)")
@@ -264,11 +265,42 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     _logo()
+
+    # Postman: a collection can be scanned on its OWN — derive the target URL,
+    # scope hosts and (if present) the auth token straight from the file, so the
+    # user can run `vapt.py --postman collection.json` with nothing else.
+    pm_auth_header = ""
+    if args.postman:
+        if not os.path.isfile(args.postman):
+            ap.error(f"--postman file not found: {args.postman}")
+        os.environ["VAPT_POSTMAN"] = os.path.abspath(args.postman)
+        if not args.target:
+            from vaptbench import discovery as _disc
+            prof = _disc.postman_profile(os.path.abspath(args.postman))
+            if prof.get("error"):
+                ap.error(f"could not read the Postman file: {prof['error']}")
+            if not prof.get("resolved"):
+                ap.error(
+                    "the Postman collection has no usable base URL in it — its host is a "
+                    "variable (e.g. {{baseUrl}}) whose value lives in a separate environment "
+                    "export you didn't provide. Pass the API base URL as the target:\n"
+                    f"  python vapt.py https://api.your-host.com/ --postman {args.postman}")
+            args.target = prof["base_url"]
+            if not args.scope:
+                args.scope = list(prof["hosts"])
+            if not args.role and prof.get("auth_header"):
+                pm_auth_header = prof["auth_header"]
+            print(_c("90", f"  derived from Postman → target {prof['base_url']}   "
+                           f"scope: {', '.join(prof['hosts'])}"
+                           + ("   + embedded auth token" if pm_auth_header else
+                              "   (no auth token in file)")))
+
     if not args.target:
         if sys.stdin.isatty():
             _interactive_setup(args)
         if not args.target:
-            ap.error("a target URL is required (pass it as an argument or run interactively)")
+            ap.error("a target URL is required (pass it as an argument, via --postman, "
+                     "or run interactively)")
 
     # Decide web vs network. IP/CIDR targets => network; otherwise validate URL.
     net_mode = args.mode == "network" or (args.mode == "auto" and _is_ip_target(args.target))
@@ -283,10 +315,6 @@ def main(argv=None):
 
     if args.ports:
         os.environ["VAPT_NET_PORTS_SPEC"] = args.ports
-    if args.postman:
-        if not os.path.isfile(args.postman):
-            ap.error(f"--postman file not found: {args.postman}")
-        os.environ["VAPT_POSTMAN"] = os.path.abspath(args.postman)
     if args.no_agent:
         os.environ["VAPT_AGENT"] = "0"
     if args.db:
@@ -325,6 +353,11 @@ def main(argv=None):
                 auth_type=args.auth,
                 login_url=args.login_url or args.target)
             db.session.add(ident)
+        # auth token lifted from the Postman collection (no --role given)
+        if pm_auth_header and not args.role:
+            db.session.add(Identity(
+                target_id=t.id, role="api", username="", secret=pm_auth_header,
+                auth_type="curl", login_url=args.target))
         db.session.commit()
         tid = t.id
 

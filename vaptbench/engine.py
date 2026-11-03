@@ -29,6 +29,9 @@ from . import verifiers3 as V3
 from . import verifiers_post as VP
 from . import verifiers_json as VJ
 from . import verifiers_path as VPath
+from . import verifiers_hostheader as VHH
+from . import verifiers_massassign as VMA
+from . import verifiers_csrf as VCSRF
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
@@ -458,6 +461,10 @@ def _run(app, run_id):
             if not run.stop_requested:
                 _path_param_phase(run, send, endpoints, seen, primary)
 
+            # --- Phase 3d4: host-header injection + session-token weakness --
+            if not run.stop_requested:
+                _header_session_phase(run, send, t.base_url, endpoints, seen)
+
             # --- Phase 3e: control-bypass / payload-variation pass ---------
             if BYPASS_MODE and not run.stop_requested:
                 _variation_phase(run, send, endpoints, seen)
@@ -563,6 +570,11 @@ def _post_inject_phase(run, send, post_forms, seen, base_url):
         uniq.append(form)
     if not uniq:
         return
+    # the app's Set-Cookie on the base page — used to judge CSRF SameSite posture
+    try:
+        set_cookie = (send("GET", base_url).get("headers") or {}).get("Set-Cookie", "")
+    except Exception:
+        set_cookie = ""
     _log(run, "info", "inject", f"POST-form injection ({len(uniq)} unique form(s))...")
     for form in uniq[:MAX_INJECT_ENDPOINTS]:
         if run.stop_requested:
@@ -572,6 +584,8 @@ def _post_inject_phase(run, send, post_forms, seen, base_url):
              f"POST {urlparse(form['action']).path} fields={list(form['inputs'])}")
         try:
             for f in VP.check_post_form(send, form):
+                _add_finding(run, seen, f)
+            for f in VCSRF.check_csrf(form, set_cookie):      # missing anti-CSRF token
                 _add_finding(run, seen, f)
         except Exception as e:
             _log(run, "warn", "inject", f"post-inject error on {form['action']}: {e}")
@@ -605,8 +619,41 @@ def _api_body_phase(run, send, body_ops, seen, primary):
         try:
             for f in VJ.check_json_body(jsend, op):
                 _add_finding(run, seen, f)
+            for f in VMA.check_mass_assignment(jsend, op):     # privileged-field binding
+                _add_finding(run, seen, f)
         except Exception as e:
             _log(run, "warn", "inject", f"json-body fuzz error on {op['url']}: {e}")
+        db.session.commit()
+
+
+def _header_session_phase(run, send, base_url, endpoints, seen):
+    """Host-header injection (base + parameterless endpoints) and session-token
+    weakness on the base response. Both deterministic / low-noise."""
+    targets = [base_url] + [u for u in endpoints
+                            if not is_static_asset(u)][:max(0, MAX_INJECT_ENDPOINTS - 1)]
+    seen_hosts = set()
+    uniq = []
+    for u in targets:
+        k = (urlparse(u).netloc, urlparse(u).path)
+        if k in seen_hosts:
+            continue
+        seen_hosts.add(k)
+        uniq.append(u)
+    _log(run, "info", "test", f"Host-header injection + session checks ({len(uniq)} target(s))...")
+    try:
+        sc = (send("GET", base_url).get("headers") or {}).get("Set-Cookie", "")
+        for f in VCSRF.check_session_token(sc):
+            _add_finding(run, seen, f)
+    except Exception as e:
+        _log(run, "warn", "test", f"session check error: {e}")
+    for u in uniq:
+        if run.stop_requested:
+            break
+        try:
+            for f in VHH.check_host_header(send, u):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "test", f"host-header error on {u}: {e}")
         db.session.commit()
 
 

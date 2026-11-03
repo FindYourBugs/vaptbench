@@ -34,6 +34,10 @@ top-down instead of ad-hoc. `🟢` shipped · `🟡` partial · `🔴` not yet �
 | Open redirect | E2 | 🟢 | |
 | CORS / headers / cookies / methods / exposed files | E1 | 🟢 | |
 | IDOR/BOLA · privesc/BFLA · missing-auth · authn-bypass | E8 | 🟢 | + single-account + **unauth seed-ref BOLA** |
+| Mass assignment / auto-binding | E4 | 🟢 | privileged field accepted & echoed |
+| Host-header injection | E1 | 🟢 | unique marker reflected in body/Location |
+| CSRF (missing token) | `verifiers_csrf.py` | 🟡 | needs-review (no browser to prove cross-site) |
+| Session-token weakness | `verifiers_csrf.py` | 🟡 | needs-review (short/low-entropy id) |
 | JWT weak-secret | E2 | 🟡 | secret only (no alg-confusion/kid/jku) |
 | Vulnerable components (JS libs, nuclei CVEs) | E10 | 🟢 | curated JS table + nuclei templates |
 | File-upload RCE | E9 | 🟢 | |
@@ -43,7 +47,7 @@ top-down instead of ad-hoc. `🟢` shipped · `🟡` partial · `🔴` not yet �
 ## Backlog (worked in sprints)
 **Sprint 1 — recall gaps (DONE):** cmd-exec output oracle ✅ · LFI content canary ✅ · in-band SSRF ✅ · unauth seed-ref BOLA ✅
 
-**Sprint 2 — high-frequency classes:** CSRF 🔴 · mass-assignment 🔴 · host-header injection 🔴 · session management (fixation/rotation/entropy) 🔴
+**Sprint 2 — high-frequency classes (DONE):** CSRF ✅ (needs-review) · mass-assignment ✅ · host-header injection ✅ · session-token weakness ✅ (fixation/rotation still 🔴)
 
 **Sprint 3 — deeper classes:** XXE 🔴 · brute-force/lockout 🔴 · CRLF/response-splitting 🔴 · auto-signup provisioning 🔴
 

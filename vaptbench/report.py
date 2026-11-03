@@ -40,6 +40,8 @@ CLASS_MAP = {
     "hunt-auth-bypass": ("CWE-287", "A07:2021 – Auth Failures",            "Authentication"),
     "hunt-graphql":    ("CWE-16",   "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),
     "hunt-misc":       ("CWE-693",  "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),
+    "api-doc-exposure": ("CWE-200", "A05:2021 – Security Misconfiguration", "Information Disclosure"),
+    "graphql-introspection": ("CWE-200", "A05:2021 – Security Misconfiguration", "Information Disclosure"),
     "chain":           ("-",        "-",                                    "Attack Chain"),
     # network / infrastructure classes
     "net-service":     ("-",        "-",                                    "Network Exposure"),

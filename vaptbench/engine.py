@@ -29,10 +29,12 @@ from . import ai as ai_mod
 from . import agent as agent_mod
 from . import critic as critic_mod
 from . import spa_crawl
+from . import discovery as discovery_mod
 from . import exploit as exploit_mod
 from .skills import load_playbook
 
 SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch API surface
+DEEP_DISCOVERY = os.environ.get("VAPT_DEEP_DISCOVERY", "1") != "0"  # sitemap/API/param-mining
 
 AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model is up
 CRITIC_MODE = os.environ.get("VAPT_CRITIC", "1") != "0"  # skeptical review of findings
@@ -42,7 +44,7 @@ MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
 
-MAX_ENDPOINTS = 40
+MAX_ENDPOINTS = int(os.environ.get("VAPT_MAX_ENDPOINTS", "60"))
 LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\'#?\s][^"\']*)["\']', re.I)
 ASSET_RE = re.compile(
     r"\.(?:js|mjs|css|map|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|mp4|webm)(?:$|\?)", re.I)
@@ -232,6 +234,76 @@ def _spa_discover(run, send, t, endpoints, primary, scope):
     return out[:MAX_ENDPOINTS]
 
 
+def _deep_discovery(run, send, t, endpoints, primary, scope, seen, post_forms):
+    """Sitemap/robots + OpenAPI/Swagger + GraphQL ingestion + hidden-parameter
+    mining. Merges newly found endpoints (prioritising parameterised ones),
+    persists them for the Repeater/matrix, and records exposed API-doc findings."""
+    _log(run, "info", "discover",
+         "Deep discovery: sitemap/robots, OpenAPI/Swagger + GraphQL, hidden-param mining...")
+
+    def dsend(method, url, headers="", body=""):
+        return send(method, url, headers=headers, body=body, identity=primary)
+
+    try:
+        new_urls, post_methods, notes = discovery_mod.expand_surface(
+            t.base_url, dsend, scope, endpoints,
+            lambda lvl, ph, msg: _log(run, lvl, ph, msg))
+    except Exception as e:
+        _log(run, "warn", "discover", f"deep discovery error: {e}")
+        return endpoints
+
+    existing = set(endpoints)
+    added = 0
+    for url in new_urls:
+        if url not in existing:
+            added += 1
+            db.session.add(RequestLog(target_id=t.id, method="GET", url=url, resp_body=""))
+    # record non-GET API operations as captured requests too (matrix can replay)
+    for meth, url in post_methods:
+        db.session.add(RequestLog(target_id=t.id, method=meth, url=url, resp_body=""))
+    db.session.commit()
+
+    # Exposed API documentation / introspection are low-severity findings clients
+    # care about (they hand an attacker the full map). The GraphQL endpoint also
+    # flows into the deterministic introspection verifier via the endpoint list.
+    for kind, url, detail in notes:
+        if kind == "openapi":
+            _add_finding(run, seen, dict(
+                title="API documentation publicly exposed (OpenAPI/Swagger)",
+                vuln_class="api-doc-exposure", severity="low", confidence="confirmed",
+                cvss="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                description=f"An OpenAPI/Swagger specification is reachable without authentication "
+                            f"at {url}, disclosing {detail} — the complete API contract (routes, "
+                            f"parameters, auth scheme). Each documented route was added to the test "
+                            f"surface.",
+                steps=f"GET {url}", poc_request=f"GET {url}",
+                poc_response=detail))
+        elif kind == "graphql":
+            _add_finding(run, seen, dict(
+                title="GraphQL introspection enabled",
+                vuln_class="graphql-introspection", severity="low", confidence="confirmed",
+                cvss="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                description=f"The GraphQL endpoint at {url} answers introspection queries, exposing "
+                            f"the full schema (every query, mutation and type) to any client. This "
+                            f"hands an attacker the complete API map.",
+                steps=f"POST {url} with a standard __schema introspection query",
+                poc_request=f"POST {url}  {{__schema{{types{{name}}}}}}",
+                poc_response=detail))
+
+    if added or post_methods:
+        _log(run, "info", "discover",
+             f"deep discovery: +{added} new endpoint(s), {len(post_methods)} non-GET operation(s)")
+    else:
+        _log(run, "info", "discover", "deep discovery: no additional surface found")
+
+    # Merge: parameterised endpoints first (more testable), then re-cap.
+    merged, out = set(), []
+    for u in sorted(new_urls, key=lambda u: (0 if urlparse(u).query else 1, len(u))) + endpoints:
+        if u not in merged:
+            merged.add(u); out.append(u)
+    return out[:MAX_ENDPOINTS]
+
+
 def _run(app, run_id):
     with app.app_context():
         run = Run.query.get(run_id)
@@ -281,6 +353,13 @@ def _run(app, run_id):
             # attack surface on React/Vue/Angular/Next targets.
             if SPA_CRAWL:
                 endpoints = _spa_discover(run, send, t, endpoints, primary, scope)
+
+            # Deep discovery: sitemap/robots, OpenAPI/Swagger + GraphQL ingestion,
+            # and hidden-parameter mining — close the "did we reach every page /
+            # param / API route" gap before testing begins.
+            if DEEP_DISCOVERY:
+                endpoints = _deep_discovery(run, send, t, endpoints, primary, scope,
+                                            seen, post_forms)
 
             # Passive checks on the base response (phase back to recon so these
             # findings are attributed correctly, not to the SPA sub-phase).

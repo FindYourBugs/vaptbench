@@ -177,6 +177,29 @@ missing-auth on an API route group shows up. Toggle with `VAPT_SPA_CRAWL=0`.
 Runtime capture needs Playwright (installed by `scripts/setup_kali.sh`); without
 it the static harvest still runs.
 
+## Deep discovery (reach the whole attack surface)
+Beyond the in-page crawl + SPA API capture, the engine runs three more
+discovery sources before testing so pages, parameters and API routes aren't
+missed (Phase 2b, `discovery.py`):
+- **Sitemap / robots ingestion** — parses `robots.txt` (Allow/Disallow/Sitemap)
+  and `sitemap.xml` (incl. nested sitemap indexes) for pages nothing linked to.
+- **OpenAPI / Swagger ingestion** — fetches the common spec locations
+  (`/openapi.json`, `/swagger.json`, `/v3/api-docs`, …), resolves the server
+  base, and expands **every documented route** into a concrete, testable URL
+  (path params filled, query params attached). Non-GET operations are captured
+  for the matrix. A publicly reachable spec is also recorded as a finding.
+- **GraphQL introspection** — probes the common GraphQL paths; if introspection
+  answers, the endpoint enters the test surface (and the deterministic
+  introspection verifier flags it).
+- **Hidden-parameter mining** — runs **arjun** on parameter-less endpoints to
+  find params that exist server-side but appear in no form or link, then
+  synthesises `?p=1` URLs for the injection tiers.
+
+Toggle with `VAPT_DEEP_DISCOVERY=0` (whole phase), `VAPT_API_INGEST=0`
+(OpenAPI/GraphQL), `VAPT_PARAM_MINING=0` (arjun). `VAPT_MAX_ENDPOINTS` caps the
+merged surface (default 60); `VAPT_PARAM_MINE_MAX` caps how many endpoints arjun
+runs on (default 6).
+
 ## Autonomous engine (Start VAPT)
 Click **Start VAPT** on a target and the engine runs the whole web VAPT in the
 background — authenticate every role → recon/map → test & verify → access

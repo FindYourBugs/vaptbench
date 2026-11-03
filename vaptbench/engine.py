@@ -32,6 +32,8 @@ from . import verifiers_path as VPath
 from . import verifiers_hostheader as VHH
 from . import verifiers_massassign as VMA
 from . import verifiers_csrf as VCSRF
+from . import verifiers_crlf as VCRLF
+from . import verifiers_xxe as VXXE
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
@@ -543,7 +545,8 @@ def _mopup(run, send, endpoints, seen, primary, ctx):
             ctx.injected.add(url)
             _log(run, "test", "inject", f"mop-up Tier-2: {url}")
             for fn in (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
-                       V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output):
+                       V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output,
+                       VCRLF.check_crlf):
                 try:
                     for f in fn(send, url):
                         _add_finding(run, seen, f)
@@ -985,7 +988,8 @@ def _inject_phase(run, send, t, endpoints, identities, seen):
             _log(run, "warn", "inject", "stop requested — halting"); break
         _log(run, "test", "inject", f"[{i}/{len(param_eps)}] injecting {url}")
         checks = (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
-                  V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output)
+                  V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output,
+                  VCRLF.check_crlf)
         hit_classes = set()
         for fn in checks:
             try:
@@ -1067,6 +1071,26 @@ def _advanced_phase(run, send, t, endpoints, seen):
                 _add_finding(run, seen, f)
         except Exception as e:
             _log(run, "warn", "advanced", f"dom error on {url}: {e}")
+    db.session.commit()
+
+    # XXE — POST an XML body to candidate endpoints (one per path shape).
+    xxe_seen, xxe_eps = set(), []
+    for u in endpoints:
+        if is_static_asset(u):
+            continue
+        k = urlparse(u)._replace(query="").geturl()
+        if k in xxe_seen:
+            continue
+        xxe_seen.add(k)
+        xxe_eps.append(k)                      # query-less URL for the XML POST
+    for url in xxe_eps[:MAX_ADV_ENDPOINTS]:
+        if run.stop_requested:
+            break
+        try:
+            for f in VXXE.check_xxe(send, url, make_callback, was_hit):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "advanced", f"xxe error on {url}: {e}")
     db.session.commit()
 
 

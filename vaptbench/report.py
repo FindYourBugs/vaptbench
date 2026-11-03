@@ -41,6 +41,8 @@ CLASS_MAP = {
     "hunt-open-redirect": ("CWE-601", "A01:2021 – Broken Access Control",   "Open Redirect"),
     "hunt-jwt-crypto": ("CWE-347",  "A02:2021 – Cryptographic Failures",    "Authentication"),
     "hunt-auth-bypass": ("CWE-287", "A07:2021 – Auth Failures",            "Authentication"),
+    "hunt-xxe":        ("CWE-611",  "A05:2021 – Security Misconfiguration", "XML External Entity"),
+    "hunt-crlf":       ("CWE-113",  "A03:2021 – Injection",                 "HTTP Response Splitting"),
     "hunt-mass-assign": ("CWE-915", "A08:2021 – Software & Data Integrity Failures", "Mass Assignment"),
     "hunt-host-header": ("CWE-644", "A05:2021 – Security Misconfiguration", "Host Header Injection"),
     "hunt-csrf":       ("CWE-352",  "A01:2021 – Broken Access Control",     "Cross-Site Request Forgery"),

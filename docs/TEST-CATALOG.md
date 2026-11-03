@@ -43,17 +43,23 @@ top-down instead of ad-hoc. `🟢` shipped · `🟡` partial · `🔴` not yet �
 | File-upload RCE | E9 | 🟢 | |
 | GraphQL introspection | discovery | 🟢 | no field-authz/batching |
 | TLS / network services / default DB creds | E12 | 🟢 | |
+| XXE | `verifiers_xxe.py` | 🟢 | file read / OOB / in-band marker |
+| CRLF / response splitting | `verifiers_crlf.py` | 🟢 | injected header surfaces in response |
+| Web cache poisoning | `verifiers_cache.py` | 🟢 | unkeyed input reflected + cacheable |
+| Insecure deserialization | `verifiers_deser.py` | 🟡 | needs-review (error sig; RCE not auto-exploited) |
+| OAuth / OIDC redirect_uri | `verifiers_oauth.py` | 🟢 | redirects to attacker origin |
+| Login rate-limit / lockout | `verifiers_authn.py` | 🟡 | needs-review (bogus-user probe) |
 
 ## Backlog (worked in sprints)
 **Sprint 1 — recall gaps (DONE):** cmd-exec output oracle ✅ · LFI content canary ✅ · in-band SSRF ✅ · unauth seed-ref BOLA ✅
 
 **Sprint 2 — high-frequency classes (DONE):** CSRF ✅ (needs-review) · mass-assignment ✅ · host-header injection ✅ · session-token weakness ✅ (fixation/rotation still 🔴)
 
-**Sprint 3 — deeper classes:** XXE 🔴 · brute-force/lockout 🔴 · CRLF/response-splitting 🔴 · auto-signup provisioning 🔴
+**Sprint 3 — deeper classes (DONE):** XXE ✅ · CRLF/response-splitting ✅ · brute-force/lockout ✅ (needs-review) · auto-signup provisioning 🔴
 
-**Sprint 4 — advanced:** race conditions 🔴 · insecure deserialization 🔴 · OAuth/OIDC/SAML flow abuse 🔴 · cache poisoning 🔴
+**Sprint 4 — advanced (mostly DONE):** insecure deserialization ✅ (needs-review) · OAuth redirect_uri ✅ · cache poisoning ✅ · race conditions 🔴 (manual — unsafe to auto-probe state changes) · SAML flow 🔴
 
-**Surface still thin:** nested/array **query** params (`filter[role]=`) 🔴 · headers & cookies as injection points 🔴 · JWT alg-confusion/kid/jku 🔴
+**Surface still thin:** nested/array **query** params (`filter[role]=`) 🔴 · headers & cookies as injection points 🔴 · JWT alg-confusion/kid/jku 🔴 · auto-signup provisioning 🔴
 
 Every backlog item ships with a concrete deterministic oracle — the zero-false-positive
 standard is non-negotiable (a finding is `confirmed` only when provably true).

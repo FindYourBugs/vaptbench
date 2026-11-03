@@ -34,6 +34,10 @@ from . import verifiers_massassign as VMA
 from . import verifiers_csrf as VCSRF
 from . import verifiers_crlf as VCRLF
 from . import verifiers_xxe as VXXE
+from . import verifiers_cache as VCACHE
+from . import verifiers_deser as VDESER
+from . import verifiers_oauth as VOAUTH
+from . import verifiers_authn as VAUTHN
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
@@ -467,6 +471,10 @@ def _run(app, run_id):
             if not run.stop_requested:
                 _header_session_phase(run, send, t.base_url, endpoints, seen)
 
+            # --- Phase 3d5: login rate-limiting / account-lockout ----------
+            if identities and not run.stop_requested:
+                _authn_phase(run, send, identities, seen)
+
             # --- Phase 3e: control-bypass / payload-variation pass ---------
             if BYPASS_MODE and not run.stop_requested:
                 _variation_phase(run, send, endpoints, seen)
@@ -546,7 +554,8 @@ def _mopup(run, send, endpoints, seen, primary, ctx):
             _log(run, "test", "inject", f"mop-up Tier-2: {url}")
             for fn in (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
                        V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output,
-                       VCRLF.check_crlf):
+                       VCRLF.check_crlf, VDESER.check_deserialization,
+                       VOAUTH.check_oauth_redirect):
                 try:
                     for f in fn(send, url):
                         _add_finding(run, seen, f)
@@ -655,8 +664,28 @@ def _header_session_phase(run, send, base_url, endpoints, seen):
         try:
             for f in VHH.check_host_header(send, u):
                 _add_finding(run, seen, f)
+            for f in VCACHE.check_cache_poisoning(send, u):   # unkeyed-input cache poisoning
+                _add_finding(run, seen, f)
         except Exception as e:
             _log(run, "warn", "test", f"host-header error on {u}: {e}")
+        db.session.commit()
+
+
+def _authn_phase(run, send, identities, seen):
+    """Login rate-limiting / account-lockout — probed with a bogus account so a
+    real supplied user is never locked out."""
+    seen_urls = set()
+    for ident in identities:
+        lu = getattr(ident, "login_url", None)
+        if not lu or lu in seen_urls:
+            continue
+        seen_urls.add(lu)
+        _log(run, "info", "auth", f"Login rate-limit probe on {lu} (bogus account)...")
+        try:
+            for f in VAUTHN.check_login_rate_limit(send, lu):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "auth", f"rate-limit probe error on {lu}: {e}")
         db.session.commit()
 
 
@@ -989,7 +1018,8 @@ def _inject_phase(run, send, t, endpoints, identities, seen):
         _log(run, "test", "inject", f"[{i}/{len(param_eps)}] injecting {url}")
         checks = (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
                   V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output,
-                  VCRLF.check_crlf)
+                  VCRLF.check_crlf, VDESER.check_deserialization,
+                  VOAUTH.check_oauth_redirect)
         hit_classes = set()
         for fn in checks:
             try:

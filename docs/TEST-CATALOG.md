@@ -21,6 +21,17 @@ top-down instead of ad-hoc. `🟢` shipped · `🟡` partial · `🔴` not yet �
 | E12 Network | `net_verifiers.py` | open services | protocol-level proof |
 | E13 Chain correlation | `_chain_phase` | confirmed findings | rule match |
 
+**Authentication (gets us *into* the app so the above engines have surface):**
+fixed-selector browser login (`browser_login.py`) handles static forms, SPAs, and
+two-step/identifier-first flows. When that can't confirm, an **AI-adaptive login**
+drives the live page one action at a time (multi-step wizards, extra tenant/company
+field, SSO click-through, re-rendered steps). Credentials go to the model by name
+only — never their values. Login is `confirmed` only when a real session is captured
+(`_confirmed`); the model can't assert success, and it **stops with a precise reason**
+on a wall it must not fake (OTP, hardware WebAuthn, device-trust, CAPTCHA) — pointing
+the user to capture a session manually and pass `--auth bearer/cookie`. Toggle with
+`VAPT_AI_LOGIN` / `VAPT_AI_LOGIN_STEPS`.
+
 ## Vulnerability coverage
 | Vulnerability | Engine | Status | Note |
 |---|---|---|---|

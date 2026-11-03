@@ -269,6 +269,32 @@ fetched: if the server **executes** it → RCE via unrestricted upload (critical
 if it is stored but inert → dangerous/unrestricted upload (medium). Toggle with
 `VAPT_UPLOAD=0`.
 
+## Authorization & authentication suite (Phase 4·authz)
+Give it the application roles (`--role ...`, repeatable) and the engine runs a full
+broken-access-control suite (`authz.py`) with a strict zero-false-positive bar — a
+bypass is only `confirmed` when it returns the **same protected content**, never a
+bare 200:
+- **Horizontal IDOR / BOLA** — an object-reference endpoint (`/orders/1001`,
+  `?id=…`) that is gated against the anonymous user but serves user A's object to a
+  *different* authenticated user B → confirmed cross-user access. Also notes when
+  identifiers are **enumerable** (an adjacent ID returns a different object).
+- **Vertical privilege escalation / BFLA** — an endpoint the app itself denies to a
+  role (so a control provably exists) that the same role then reaches via a bypass
+  variant returning the privileged body.
+- **Missing authentication** — a sensitive / object resource served identically to a
+  request with no session at all (public pages are excluded).
+- **Authentication bypass** — the anonymous user reaching an authenticated-only
+  resource through a variant.
+- **Bypass variants tried** (only against an endpoint that demonstrably enforces a
+  control): parameter injection (`&admin=true`, `&role=admin`, …), header spoofing
+  (`X-Original-URL` / `X-Rewrite-URL`, `X-Forwarded-For/-Host`, `X-Custom-IP-
+  Authorization`, …), path mangling (trailing slash, `//`, `/%2e/`, `..;/`, `.json`),
+  and verb tampering (POST/HEAD/PUT, `X-HTTP-Method-Override`).
+
+Cross-user IDOR and privilege escalation need **≥2 authenticated roles**; with one
+role it still runs missing-auth, authn-bypass and enumerable-reference checks.
+Toggle with `VAPT_AUTHZ=0`; `VAPT_AUTHZ_MAX` caps endpoints (default 25).
+
 ## Hybrid web + infrastructure (Phase 4a)
 A web app runs on a host that usually exposes more than `:443`. In web mode the
 engine now **port-scans the target host** and runs the network service verifiers

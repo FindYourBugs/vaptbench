@@ -40,6 +40,7 @@ from . import upload as upload_mod
 from . import netscan
 from . import net_verifiers as NV
 from . import jslibs
+from . import authz as authz_mod
 from .scope import in_scope
 from .skills import load_playbook
 
@@ -464,6 +465,10 @@ def _run(app, run_id):
             if len(identities) >= 1 and not run.stop_requested:
                 _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
                 _access_control(run, send, endpoints, identities, seen)
+
+            # --- Phase 4·authz: IDOR/BOLA, privesc, authn, bypass variants -
+            if not run.stop_requested:
+                _authz_phase(run, send, endpoints, identities, seen)
 
             # --- Phase 4a: hybrid infra sweep (port scan + service verifiers)
             if WEB_INFRA and not run.stop_requested:
@@ -1119,6 +1124,33 @@ def _critic_phase(run):
         else:
             _log(run, "info", "critic", f"reviewed: {fn.title} [{rev.get('verdict','')}]")
         db.session.commit()
+
+
+def _authz_phase(run, send, endpoints, identities, seen):
+    """Full authorization/authentication suite (authz.py): horizontal IDOR/BOLA,
+    vertical privilege escalation (BFLA), missing authentication, authn bypass,
+    and access-control bypass variants (param/header/path/verb). Confirmed only
+    when a variant returns the *same protected content* — strict zero-FP bar.
+    Needs the user-supplied roles; cross-user proof needs >=2 authenticated ones."""
+    authed = [i for i in identities if getattr(i, "session_blob", None)]
+    n_auth = len(authed)
+    _log(run, "info", "access",
+         f"Authorization suite: IDOR/BOLA + privilege-escalation + authn + bypass "
+         f"variants ({n_auth} authenticated role(s))...")
+    if n_auth < 2:
+        _log(run, "info", "access",
+             "only %d authenticated role(s) — cross-user IDOR/privesc needs >=2 roles; "
+             "running missing-auth, authn-bypass and enumeration checks" % n_auth)
+    try:
+        found = authz_mod.run_authz(
+            send, endpoints, identities,
+            log=lambda lvl, ph, msg: _log(run, lvl, "access", msg))
+    except Exception as e:
+        _log(run, "warn", "access", f"authz suite error: {e}")
+        return
+    for f in found:
+        _add_finding(run, seen, f)
+    db.session.commit()
 
 
 def _access_control(run, send, endpoints, identities, seen):

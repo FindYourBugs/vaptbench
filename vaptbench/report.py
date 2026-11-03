@@ -33,6 +33,8 @@ CLASS_MAP = {
     "hunt-ssti":       ("CWE-1336", "A03:2021 – Injection",                 "Injection / RCE"),
     "hunt-cmd":        ("CWE-78",   "A03:2021 – Injection",                 "Injection / RCE"),
     "hunt-idor":       ("CWE-639",  "A01:2021 – Broken Access Control",     "Authorization & Access Control"),
+    "hunt-authz":      ("CWE-285",  "A01:2021 – Broken Access Control",     "Privilege Escalation / BFLA"),
+    "hunt-auth":       ("CWE-306",  "A01:2021 – Broken Access Control",     "Missing Authentication"),
     "hunt-ssrf":       ("CWE-918",  "A10:2021 – SSRF",                      "Server-Side Request Forgery"),
     "hunt-cors":       ("CWE-942",  "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),
     "hunt-clickjacking": ("CWE-1021", "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),

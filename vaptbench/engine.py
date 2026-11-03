@@ -31,6 +31,7 @@ from . import critic as critic_mod
 from . import spa_crawl
 from . import discovery as discovery_mod
 from . import exploit as exploit_mod
+from . import bypass as bypass_mod
 from .skills import load_playbook
 
 SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch API surface
@@ -40,6 +41,9 @@ AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model 
 CRITIC_MODE = os.environ.get("VAPT_CRITIC", "1") != "0"  # skeptical review of findings
 EXPLOIT_MODE = os.environ.get("VAPT_EXPLOIT", "1") != "0"  # extract read-only proof from confirmed findings
 EXPLOIT_MARKER = "\n\n--- Exploitation (read-only proof) ---\n"  # shared by exploit + writeup + report
+BYPASS_MODE = os.environ.get("VAPT_BYPASS", "1") != "0"   # filter/WAF bypass payload-variation pass
+BYPASS_TIMING = os.environ.get("VAPT_BYPASS_TIMING", "1") != "0"  # include slow cmd-timing variants
+MAX_BYPASS_ENDPOINTS = int(os.environ.get("VAPT_BYPASS_MAX", "10"))
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -401,6 +405,10 @@ def _run(app, run_id):
             if not run.stop_requested:
                 _post_inject_phase(run, send, post_forms, seen, t.base_url)
 
+            # --- Phase 3e: control-bypass / payload-variation pass ---------
+            if BYPASS_MODE and not run.stop_requested:
+                _variation_phase(run, send, endpoints, seen)
+
             # --- Phase 4: access-control matrix ----------------------------
             if len(identities) >= 1 and not run.stop_requested:
                 _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
@@ -499,6 +507,70 @@ def _post_inject_phase(run, send, post_forms, seen, base_url):
         except Exception as e:
             _log(run, "warn", "inject", f"post-inject error on {form['action']}: {e}")
         db.session.commit()
+
+
+def _param_from_title(title):
+    m = re.search(r"via '([^']+)'", title or "")
+    return m.group(1) if m else None
+
+
+def _variation_phase(run, send, endpoints, seen):
+    """Rotate filter/WAF-bypass payload VARIATIONS across the injection classes
+    and confirm each only via a deterministic signal — proving the control is
+    bypassable, not merely that input is reflected. Only tries (class, param)
+    pairs a baseline verifier did NOT already confirm, so it adds net-new proof."""
+    from urllib.parse import parse_qs
+    param_eps = [u for u in endpoints
+                 if urlparse(u).query and not is_static_asset(u)][:MAX_BYPASS_ENDPOINTS]
+    if not param_eps:
+        return
+
+    # classes already confirmed per param -> skip (baseline got them)
+    done = set()
+    for f in Finding.query.filter_by(run_id=run.id, confidence="confirmed").all():
+        p = _param_from_title(f.title)
+        if p:
+            done.add((f.vuln_class, p))
+
+    classes_all = ["hunt-sqli", "hunt-xss", "hunt-ssti", "hunt-lfi", "hunt-cmd", "hunt-ssrf"]
+    mark = "bqx" + uuid.uuid4().hex[:6]
+
+    def was_hit(token):
+        for _ in range(4):
+            if OobHit.query.filter_by(token=token).first():
+                return True
+            time.sleep(0.4)
+        return False
+
+    _log(run, "info", "bypass",
+         f"Control-bypass / payload-variation pass on {len(param_eps)} parameterised endpoint(s)...")
+    for url in param_eps:
+        if run.stop_requested:
+            break
+        q = parse_qs(urlparse(url).query, keep_blank_values=True)
+        inputs = {k: v[0] for k, v in q.items()}
+        for param in list(q)[:3]:
+            if run.stop_requested:
+                break
+            classes = [c for c in classes_all if (c, param) not in done]
+            if not classes:
+                continue
+            token = f"ssrfbp{uuid.uuid4().hex[:12]}"
+            ctx = {"mark": mark, "oob_host": f"{OOB_HOST}/oob", "oob_token": token,
+                   "oob_check": was_hit}
+            if not BYPASS_TIMING:
+                # cheap mode: drop the slow cmd-timing path by pre-marking cmd done
+                classes = [c for c in classes if c != "hunt-cmd"]
+            try:
+                found = bypass_mod.run_variations(send, "GET", url, param, inputs, classes, ctx)
+            except Exception as e:
+                _log(run, "warn", "bypass", f"error on {url} [{param}]: {e}")
+                continue
+            for f in found:
+                _add_finding(run, seen, f)
+                done.add((f["vuln_class"], param))
+                _log(run, "hit", "bypass", f"★ {f['title']} — bypass: {f['steps'][:80]}")
+            db.session.commit()
 
 
 def _deterministic_sweep(run, send, t, endpoints, identities, seen, primary=None):

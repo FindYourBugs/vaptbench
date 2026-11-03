@@ -200,6 +200,37 @@ Toggle with `VAPT_DEEP_DISCOVERY=0` (whole phase), `VAPT_API_INGEST=0`
 merged surface (default 60); `VAPT_PARAM_MINE_MAX` caps how many endpoints arjun
 runs on (default 6).
 
+## Control-bypass / payload-variation engine
+A single baseline payload misses anything behind partial sanitisation or a WAF.
+After the baseline tiers, a **variation pass** (`bypass.py`, Phase 3e) rotates a
+matrix of filter-bypass payloads per parameter and confirms a hit **only via a
+deterministic signal** — proving the control is *bypassable*, not merely that
+input is reflected. It records **which variation** defeated the control. It only
+tries `(class, parameter)` pairs the baseline verifiers did **not** already
+confirm, so it adds net-new proof without duplicating findings.
+
+Classes & signals:
+- **SQLi** — quote/paren/comment + inline-comment/newline WAF bypasses; signal =
+  a new SQL error the payload provoked.
+- **XSS** — self-contained element injections (`<svg>`, `<img onerror>`,
+  `<body onload>`, `<details ontoggle>`, mixed-case, `<iframe>`, `<marquee>`,
+  `<video><source>`); signal = the executable construct survives **unencoded**
+  (context-independent, so no false positives from reflected-but-inert text).
+- **OS command injection** — output signature (`id`) + bypass-style timing
+  (`${IFS}`, brace expansion, quoted break-out, newline); signal = `uid=…` output
+  or a reproducible, double-checked delay.
+- **SSTI** — multi-engine arithmetic (Jinja2/Twig, ERB, Freemarker/Mako, Smarty,
+  Velocity, Razor, Thymeleaf); signal = the computed product next to our marker,
+  without the literal expression.
+- **LFI / path traversal** — traversal depths, `....//`, URL/double-URL encoding,
+  `php://filter` (base64), `/proc/self/environ`, `file://`, `.env`, Windows;
+  signal = a file signature (`root:…:0:0`, `win.ini`, base64 passwd, `.env`).
+- **SSRF** — scheme/parser bypasses (gopher, dict, `//`, `@`-trick, uppercase
+  scheme, trailing-dot host); signal = a real OOB callback.
+
+Toggle with `VAPT_BYPASS=0`; `VAPT_BYPASS_TIMING=0` drops the slow cmd-timing
+variants; `VAPT_BYPASS_MAX` caps endpoints (default 10).
+
 ## Autonomous engine (Start VAPT)
 Click **Start VAPT** on a target and the engine runs the whole web VAPT in the
 background — authenticate every role → recon/map → test & verify → access

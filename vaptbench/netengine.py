@@ -177,8 +177,18 @@ def _nuclei_host(run, host, svcs, seen):
         sev = (info.get("severity") or "info").lower()
         if sev not in ("critical", "high", "medium", "low", "info"):
             sev = "info"
+        name = info.get("name", j.get("template-id", "nuclei finding"))
+        # Info-level nuclei templates are mostly service/version *detections*
+        # (e.g. "RDP - Detection", "TLS Version - Detect"): keep them in the live
+        # feed for context but out of the findings/report, which would otherwise
+        # drown the real issues. Our own surface entry + verifiers already cover
+        # "this service exists". Promote only severity-bearing matches.
+        if sev == "info":
+            web_engine._log(run, "info", "nuclei",
+                            f"[detection] {name} @ {j.get('matched-at', host)}")
+            continue
         web_engine._add_finding(run, seen, dict(
-            title=f"{info.get('name', j.get('template-id','nuclei finding'))} ({j.get('matched-at','')})",
+            title=f"{name} ({j.get('matched-at','')})",
             vuln_class="net-nuclei", severity=sev, confidence="confirmed",
             description=(info.get("description") or info.get("name") or "nuclei match").strip(),
             steps=f"nuclei -id {j.get('template-id','')} -target {j.get('matched-at','')}",

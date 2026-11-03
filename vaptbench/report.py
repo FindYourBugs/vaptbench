@@ -55,6 +55,14 @@ CLASS_MAP = {
     "net-memcached":   ("CWE-306",  "A05:2021 – Security Misconfiguration", "Unauthenticated Datastore"),
     "net-elastic":     ("CWE-306",  "A05:2021 – Security Misconfiguration", "Unauthenticated Datastore"),
     "net-nuclei":      ("-",        "-",                                    "Network Vulnerability"),
+    "net-ssh":         ("CWE-326",  "A02:2021 – Cryptographic Failures",    "Weak Cryptographic Config"),
+    "net-mysql":       ("CWE-1392", "A07:2021 – Auth Failures",            "Default / Weak Credentials"),
+    "net-postgres":    ("CWE-1392", "A07:2021 – Auth Failures",            "Default / Weak Credentials"),
+    "net-mssql":       ("CWE-1392", "A07:2021 – Auth Failures",            "Default / Weak Credentials"),
+    "net-ldap":        ("CWE-287",  "A07:2021 – Auth Failures",            "Network Service — LDAP"),
+    "net-nfs":         ("CWE-552",  "A05:2021 – Security Misconfiguration", "Network Service — NFS"),
+    "net-vnc":         ("CWE-306",  "A07:2021 – Auth Failures",            "Unauthenticated Remote Access"),
+    "net-rdp":         ("CWE-287",  "A07:2021 – Auth Failures",            "Weak Remote Access Config"),
 }
 SLA = {"critical": "Within 7 days (emergency)", "high": "Within 15 days",
        "medium": "Within 30 days", "low": "Within 60 days", "info": "Next release cycle"}

@@ -68,13 +68,23 @@ Phases: **discovery + service/version scan** (nmap, with a built-in connect-scan
 fallback) → **per-service verification** (proof-only) → **nuclei** network/ssl
 templates → AI write-up + critic → the same branded report.
 
-Service verifiers (wave 1, each emits a finding only when proven): weak TLS
-protocols / expired / self-signed certs, anonymous FTP, Telnet (cleartext),
-SMTP open-relay & VRFY user-enum, DNS version disclosure, SMB null-session share
-enumeration, SNMP default community, and unauthenticated Redis / MongoDB /
-Memcached / Elasticsearch. Missing tools degrade gracefully. Scope accepts
-IP/CIDR rules (deny-wins, default-deny) — authorised targets only.
-`VAPT_NET_PORTS` sets the nmap top-ports count; `VAPT_NUCLEI=0` disables nuclei.
+Service verifiers (each emits a finding only when **proven**, never on mere
+detection). **Wave 1** — weak TLS protocols / expired / self-signed certs,
+anonymous FTP, Telnet (cleartext), SMTP open-relay & VRFY user-enum, DNS version
+disclosure, SMB null-session share enumeration, SNMP default community, and
+unauthenticated Redis / MongoDB / Memcached / Elasticsearch. **Wave 2** — weak
+SSH algorithms (KEXINIT parse: SHA-1 KEX, ssh-rsa/dss host keys, CBC ciphers,
+SHA-1/MD5 MACs), **MySQL / PostgreSQL / MSSQL default-credential login** (proven
+with a read-only `SELECT version()`), LDAP anonymous bind, NFS export
+enumeration, VNC with no authentication, and **RDP not enforcing NLA**
+(standard-RDP / TLS-only, BlueKeep-class pre-auth surface).
+
+Missing tools degrade gracefully. Scope accepts IP/CIDR rules (deny-wins,
+default-deny) — authorised targets only. `VAPT_NET_PORTS` sets the nmap top-ports
+count; `VAPT_NUCLEI=0` disables nuclei (info-level nuclei *detection* templates
+are logged to the live feed but kept out of the report so real findings aren't
+buried). `VAPT_NET_CREDS=0` disables all default-credential login attempts
+(algorithm/version checks still run).
 
 ## AI brain (local-first, hybrid-ready)
 ```bash

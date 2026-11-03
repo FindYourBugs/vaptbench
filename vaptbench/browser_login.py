@@ -23,7 +23,7 @@ USER_SELECTORS = [
     "input[type=email]",
     "input[name*=email i]", "input[name*=user i]", "input[name*=login i]",
     "input[id*=email i]", "input[id*=user i]",
-    "input[autocomplete=username]",
+    "input[autocomplete=username]", "input[type=username]",
     "input[type=text]",
 ]
 PASS_SELECTORS = ["input[type=password]", "input[name*=pass i]", "input[id*=pass i]"]
@@ -97,42 +97,82 @@ def login(identity, scope_rules):
             ctx = browser.new_context(ignore_https_errors=True)
             page = ctx.new_page()
             page.goto(url, wait_until="networkidle", timeout=30000)
-
-            # Password field appearing = the JS login form is ready.
             pw_sel = cfg.get("password_selector")
-            try:
-                page.wait_for_selector(pw_sel or "input[type=password]", timeout=12000)
-            except PWTimeout:
-                browser.close()
-                return False, "no password field appeared after JS render (wrong login URL, or MFA/redirect)"
 
-            # Username
-            if cfg.get("username_selector"):
-                page.fill(cfg["username_selector"], identity.username or "")
-            else:
+            def _fill_user():
+                if cfg.get("username_selector"):
+                    try:
+                        page.fill(cfg["username_selector"], identity.username or "")
+                        return True
+                    except Exception:
+                        return False
                 el, _ = _first(page, USER_SELECTORS)
-                if not el:
+                if el:
+                    try:
+                        el.fill(identity.username or "")
+                        return True
+                    except Exception:
+                        return False
+                return False
+
+            def _submit():
+                if cfg.get("submit_selector"):
+                    try:
+                        page.click(cfg["submit_selector"]); return
+                    except Exception:
+                        pass
+                el, _ = _first(page, SUBMIT_SELECTORS)
+                if el:
+                    try:
+                        el.click(); return
+                    except Exception:
+                        pass
+                page.keyboard.press("Enter")
+
+            def _wait_pass(timeout):
+                try:
+                    page.wait_for_selector(pw_sel or "input[type=password]",
+                                           state="visible", timeout=timeout)
+                    return True
+                except PWTimeout:
+                    return False
+
+            # Fill the username if it's on the first page.
+            user_filled = _fill_user()
+
+            # Single-step: the password field is present now (or renders shortly).
+            # Two-step (username-first — Gin & Juice, Okta, Google, Microsoft …):
+            # no password field yet, so submit the username to reveal step 2.
+            two_step = False
+            if not _wait_pass(5000):
+                if not user_filled:
                     browser.close()
-                    return False, "could not locate a username field"
-                el.fill(identity.username or "")
+                    return False, ("no password field and no username field on the login "
+                                   "page (wrong login URL, or MFA/redirect)")
+                two_step = True
+                _submit()
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except PWTimeout:
+                    pass
+                if not _wait_pass(12000):
+                    browser.close()
+                    return False, ("no password field appeared after submitting the username "
+                                   "(two-step login not completed — wrong URL/creds, MFA, or redirect)")
+                _fill_user()          # some step-2 pages re-show the username field
 
             # Password
             if pw_sel:
                 page.fill(pw_sel, identity.secret or "")
             else:
                 el, _ = _first(page, PASS_SELECTORS)
+                if not el:
+                    browser.close()
+                    return False, "could not locate a password field"
                 el.fill(identity.secret or "")
 
             start_url = page.url
-            # Submit
-            if cfg.get("submit_selector"):
-                page.click(cfg["submit_selector"])
-            else:
-                el, _ = _first(page, SUBMIT_SELECTORS)
-                if el:
-                    el.click()
-                else:
-                    page.keyboard.press("Enter")
+            _submit()
 
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
@@ -170,7 +210,8 @@ def login(identity, scope_rules):
 
             identity.session_blob = json.dumps({"cookies": cookies, "headers": headers})
             bits = [f"{len(cookies)} cookie(s)"] + (["bearer token"] if token else [])
-            return True, "browser login ok: " + ", ".join(bits)
+            return True, ("browser login ok" + (" (two-step)" if two_step else "")
+                          + ": " + ", ".join(bits))
     except Exception as e:
         return False, f"browser login failed — {error_hint(e)}"
 

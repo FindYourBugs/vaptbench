@@ -41,6 +41,7 @@ from . import verifiers_authn as VAUTHN
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
+from . import provision as provision_mod
 from . import critic as critic_mod
 from . import spa_crawl
 from . import discovery as discovery_mod
@@ -418,6 +419,29 @@ def _run(app, run_id):
             if DEEP_DISCOVERY:
                 endpoints, body_ops = _deep_discovery(run, send, t, endpoints, primary,
                                                       scope, seen, post_forms)
+
+            # Auto-signup: if the client supplied no credentials, try to register
+            # a throwaway account so the authenticated + authorization phases run.
+            if not identities and provision_mod.AUTOSIGNUP and not run.stop_requested:
+                try:
+                    prov = provision_mod.auto_provision(
+                        send, t.base_url, body_ops,
+                        log=lambda lvl, ph, msg: _log(run, lvl, ph, msg))
+                except Exception as e:
+                    prov = None
+                    _log(run, "warn", "provision", f"auto-signup error: {e}")
+                if prov:
+                    pid = Identity(target_id=t.id, role="auto-signup",
+                                   username=prov["username"], secret=prov["password"],
+                                   auth_type="cookie", session_blob=prov["session_blob"],
+                                   login_status="auto-provisioned")
+                    db.session.add(pid)
+                    db.session.commit()
+                    identities.append(pid)
+                    primary = primary or pid
+                    _log(run, "hit", "provision",
+                         f"★ auto-provisioned account '{prov['username']}' via {prov['how']} — "
+                         f"authenticated phases will run")
 
             # Passive checks on the base response (phase back to recon so these
             # findings are attributed correctly, not to the SPA sub-phase).

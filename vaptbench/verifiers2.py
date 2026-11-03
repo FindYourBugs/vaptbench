@@ -319,6 +319,34 @@ def check_jwt(tokens):
         except Exception:
             continue
         alg = (header.get("alg") or "").upper()
+        # risky header configuration (local, static -> needs-review leads)
+        if alg in ("NONE", ""):
+            out.append(_f(
+                "JWT uses the 'none' algorithm (unsigned token)", "hunt-jwt-crypto",
+                "high", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N", "needs-review",
+                "A JWT in use declares alg 'none' — if the verifier accepts it, tokens can be forged "
+                "with no signature. Confirm the server accepts an unsigned re-encoded token.",
+                "Re-encode the token with alg:none and an empty signature; replay it.",
+                f"token: {jwt[:60]}...", f"header alg={header.get('alg')!r}"))
+        for risky in ("jku", "x5u"):
+            if header.get(risky):
+                out.append(_f(
+                    f"JWT header '{risky}' present (key-source injection surface)", "hunt-jwt-crypto",
+                    "medium", "", "needs-review",
+                    f"The JWT header carries '{risky}'={header.get(risky)!r}, which points the verifier "
+                    f"at an external key source — if attacker-controllable, tokens can be re-signed with "
+                    f"a key the attacker supplies. Verify the host allowlist.",
+                    f"Point '{risky}' at an attacker-hosted JWKS/cert and re-sign the token.",
+                    f"token: {jwt[:60]}...", f"{risky}={header.get(risky)!r}"))
+        if header.get("kid") and re.search(r"""[/'"\\;]|\.\.""", str(header.get("kid"))):
+            out.append(_f(
+                "JWT 'kid' contains path/SQL metacharacters", "hunt-jwt-crypto",
+                "medium", "", "needs-review",
+                f"The JWT 'kid' header ({header.get('kid')!r}) contains metacharacters — if used to look "
+                f"up the signing key (file path / SQL), it may be injectable (path traversal / SQLi to "
+                f"force a known key).",
+                "Fuzz the 'kid' value for path-traversal / SQL injection into key lookup.",
+                f"token: {jwt[:60]}...", f"kid={header.get('kid')!r}"))
         if alg != "HS256":
             continue
         signing_input = f"{h_b64}.{p_b64}".encode()

@@ -38,7 +38,8 @@ top-down instead of ad-hoc. `🟢` shipped · `🟡` partial · `🔴` not yet �
 | Host-header injection | E1 | 🟢 | unique marker reflected in body/Location |
 | CSRF (missing token) | `verifiers_csrf.py` | 🟡 | needs-review (no browser to prove cross-site) |
 | Session-token weakness | `verifiers_csrf.py` | 🟡 | needs-review (short/low-entropy id) |
-| JWT weak-secret | E2 | 🟡 | secret only (no alg-confusion/kid/jku) |
+| JWT weaknesses | E2 | 🟢 | weak-secret crack (confirmed) + alg:none/jku/x5u/kid (needs-review) |
+| Auto-signup provisioning | `provision.py` | 🟢 | register + login throwaway account → authed phases run with zero creds |
 | Vulnerable components (JS libs, nuclei CVEs) | E10 | 🟢 | curated JS table + nuclei templates |
 | File-upload RCE | E9 | 🟢 | |
 | GraphQL introspection | discovery | 🟢 | no field-authz/batching |
@@ -57,9 +58,9 @@ top-down instead of ad-hoc. `🟢` shipped · `🟡` partial · `🔴` not yet �
 
 **Sprint 3 — deeper classes (DONE):** XXE ✅ · CRLF/response-splitting ✅ · brute-force/lockout ✅ (needs-review) · auto-signup provisioning 🔴
 
-**Sprint 4 — advanced (mostly DONE):** insecure deserialization ✅ (needs-review) · OAuth redirect_uri ✅ · cache poisoning ✅ · race conditions 🔴 (manual — unsafe to auto-probe state changes) · SAML flow 🔴
+**Sprint 4 — advanced (mostly DONE):** insecure deserialization ✅ (needs-review) · OAuth redirect_uri ✅ · cache poisoning ✅ · JWT alg:none/jku/kid ✅ (needs-review) · auto-signup provisioning ✅ · race conditions 🔴 (manual — unsafe to auto-probe state changes) · SAML flow 🔴
 
-**Surface still thin:** nested/array **query** params (`filter[role]=`) 🔴 · headers & cookies as injection points 🔴 · JWT alg-confusion/kid/jku 🔴 · auto-signup provisioning 🔴
+**Surface still thin (remaining):** nested/array **query** params (`filter[role]=`) 🔴 · headers & cookies as injection points 🔴 · race conditions 🔴 (manual) · SAML assertion attacks 🔴
 
 Every backlog item ships with a concrete deterministic oracle — the zero-false-positive
 standard is non-negotiable (a finding is `confirmed` only when provably true).

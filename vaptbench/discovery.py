@@ -296,8 +296,16 @@ def _pm_url(url, variables, base_url):
     raw = _subst_vars(raw or "", variables)
     if not raw:
         return ""
+    # A leading base-URL variable (e.g. {{baseUrl}}/users) that no collection
+    # variable resolved — the environment file that held it wasn't provided, so
+    # fall back to the target URL the user passed.
+    if raw.startswith("{{"):
+        raw = _VAR_RE.sub("", raw, count=1).lstrip("/")
+    if "{{" in raw:                    # unresolved variable mid-URL — can't test safely
+        return ""
     if not raw.startswith("http"):
-        raw = urljoin(base_url, raw)
+        base = base_url if base_url.endswith("/") else base_url + "/"
+        raw = urljoin(base, raw.lstrip("/"))
     return raw.split("#")[0] if raw.startswith("http") else ""
 
 

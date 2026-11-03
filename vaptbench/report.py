@@ -28,6 +28,7 @@ CLASS_MAP = {
     "hunt-xss":        ("CWE-79",   "A03:2021 – Injection",                 "Input Handling / XSS"),
     "hunt-html-injection": ("CWE-79", "A03:2021 – Injection",              "Input Handling / XSS"),
     "hunt-lfi":        ("CWE-22",   "A01:2021 – Broken Access Control",     "Injection / File Access"),
+    "hunt-file-upload": ("CWE-434", "A04:2021 – Insecure Design",          "Unrestricted File Upload"),
     "hunt-rce":        ("CWE-94",   "A03:2021 – Injection",                 "Injection / RCE"),
     "hunt-ssti":       ("CWE-1336", "A03:2021 – Injection",                 "Injection / RCE"),
     "hunt-cmd":        ("CWE-78",   "A03:2021 – Injection",                 "Injection / RCE"),

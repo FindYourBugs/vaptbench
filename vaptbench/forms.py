@@ -37,13 +37,17 @@ class _FormParser(HTMLParser):
         tag = tag.lower()
         if tag == "form":
             self._cur = {"method": (a.get("method") or "get").lower(),
-                         "action": a.get("action", ""), "inputs": {}}
+                         "action": a.get("action", ""), "inputs": {},
+                         "enctype": (a.get("enctype") or "").lower(),
+                         "file_field": None}
         elif tag in ("input", "textarea", "select") and self._cur is not None:
             name = a.get("name")
             if not name:
                 return
             itype = (a.get("type") or "").lower()
             if itype in _SKIP_TYPES:
+                # remember the file field so the upload tester can target it
+                self._cur["file_field"] = name
                 return
             if itype in _SUBMIT_TYPES:
                 # keep a submit button's name=value — DVWA needs &Submit=Submit
@@ -70,7 +74,8 @@ def extract_forms(html, page_url):
         if not action.startswith("http"):
             continue
         out.append({"method": f["method"], "action": action.split("#")[0],
-                    "inputs": f["inputs"]})
+                    "inputs": f["inputs"], "enctype": f.get("enctype", ""),
+                    "file_field": f.get("file_field")})
     return out
 
 
@@ -91,3 +96,14 @@ def post_forms(html, page_url):
     return [{"action": f["action"], "inputs": f["inputs"]}
             for f in extract_forms(html, page_url)
             if f["method"] == "post" and f["inputs"]]
+
+
+def upload_forms(html, page_url):
+    """Multipart file-upload forms: those with a file input (or multipart enctype)
+    — the surface the file-upload bypass tester targets."""
+    out = []
+    for f in extract_forms(html, page_url):
+        if f.get("file_field") or "multipart" in (f.get("enctype") or ""):
+            out.append({"action": f["action"], "file_field": f.get("file_field"),
+                        "inputs": f["inputs"]})
+    return out

@@ -32,6 +32,7 @@ from . import spa_crawl
 from . import discovery as discovery_mod
 from . import exploit as exploit_mod
 from . import bypass as bypass_mod
+from . import upload as upload_mod
 from .skills import load_playbook
 
 SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch API surface
@@ -44,6 +45,7 @@ EXPLOIT_MARKER = "\n\n--- Exploitation (read-only proof) ---\n"  # shared by exp
 BYPASS_MODE = os.environ.get("VAPT_BYPASS", "1") != "0"   # filter/WAF bypass payload-variation pass
 BYPASS_TIMING = os.environ.get("VAPT_BYPASS_TIMING", "1") != "0"  # include slow cmd-timing variants
 MAX_BYPASS_ENDPOINTS = int(os.environ.get("VAPT_BYPASS_MAX", "10"))
+UPLOAD_MODE = os.environ.get("VAPT_UPLOAD", "1") != "0"   # file-upload bypass tester
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -146,15 +148,19 @@ def _page_links(html, page_url, base_url):
     return out
 
 
-def _discover(base_url, base_html, scope_rules, run, send=None, primary=None, post_forms=None):
+def _discover(base_url, base_html, scope_rules, run, send=None, primary=None,
+              post_forms=None, upload_forms=None):
     """Build an endpoint list: links + FORM parameters in the base page, one
     level of authenticated crawl, katana, and known captured requests. POST
-    forms (for body injection) are appended to `post_forms` if provided."""
+    forms (for body injection) are appended to `post_forms`; multipart upload
+    forms to `upload_forms`, if provided."""
     from . import forms as forms_mod
     found = {base_url}
     found |= _page_links(base_html, base_url, base_url)
     if post_forms is not None:
         post_forms += forms_mod.post_forms(base_html, base_url)
+    if upload_forms is not None:
+        upload_forms += forms_mod.upload_forms(base_html, base_url)
 
     # One level deeper, authenticated: the entry page (login, landing) rarely
     # links straight to the injectable pages — fetch the pages it does link to
@@ -171,6 +177,8 @@ def _discover(base_url, base_html, scope_rules, run, send=None, primary=None, po
                 found |= _page_links(body, u, base_url)
                 if post_forms is not None:
                     post_forms += forms_mod.post_forms(body, u)
+                if upload_forms is not None:
+                    upload_forms += forms_mod.upload_forms(body, u)
 
     # Light katana crawl if available (depth 1); non-fatal if missing.
     res = run_tool("katana", base_url, scope_rules)
@@ -344,9 +352,10 @@ def _run(app, run_id):
                 _log(run, "error", "recon", f"base unreachable: {base.get('reason')}")
                 run.status = "error"; run.finished = datetime.utcnow(); db.session.commit()
                 return
-            post_forms = []
+            post_forms, upload_forms = [], []
             endpoints = _discover(t.base_url, base.get("text", ""), scope, run,
-                                  send=send, primary=primary, post_forms=post_forms)
+                                  send=send, primary=primary, post_forms=post_forms,
+                                  upload_forms=upload_forms)
             withparam = sum(1 for u in endpoints if urlparse(u).query)
             _log(run, "info", "recon",
                  f"{len(endpoints)} endpoint(s) in scope to test ({withparam} with parameters, "
@@ -408,6 +417,10 @@ def _run(app, run_id):
             # --- Phase 3e: control-bypass / payload-variation pass ---------
             if BYPASS_MODE and not run.stop_requested:
                 _variation_phase(run, send, endpoints, seen)
+
+            # --- Phase 3f: file-upload bypass ------------------------------
+            if UPLOAD_MODE and upload_forms and not run.stop_requested:
+                _upload_phase(run, send, upload_forms, seen, primary)
 
             # --- Phase 4: access-control matrix ----------------------------
             if len(identities) >= 1 and not run.stop_requested:
@@ -571,6 +584,37 @@ def _variation_phase(run, send, endpoints, seen):
                 done.add((f["vuln_class"], param))
                 _log(run, "hit", "bypass", f"★ {f['title']} — bypass: {f['steps'][:80]}")
             db.session.commit()
+
+
+def _upload_phase(run, send, upload_forms, seen, primary):
+    """Test discovered multipart upload forms for extension/content-type/magic-byte
+    bypass that lets an executable (or otherwise dangerous) file be stored."""
+    base_host = None
+    uniq, done = [], set()
+    for form in upload_forms:
+        key = form["action"]
+        if key in done:
+            continue
+        done.add(key)
+        uniq.append(form)
+    if not uniq:
+        return
+    _log(run, "info", "upload", f"File-upload bypass on {len(uniq)} upload form(s)...")
+
+    def usend(method, url, headers="", body=b""):
+        return send(method, url, headers=headers, body=body, identity=primary)
+
+    for form in uniq[:MAX_INJECT_ENDPOINTS]:
+        if run.stop_requested:
+            break
+        try:
+            f = upload_mod.check_upload(usend, form,
+                                        log=lambda l, p, m: _log(run, l, p, m))
+            if f:
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "upload", f"upload test error on {form['action']}: {e}")
+        db.session.commit()
 
 
 def _deterministic_sweep(run, send, t, endpoints, identities, seen, primary=None):

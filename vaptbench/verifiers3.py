@@ -44,23 +44,34 @@ def _looks_url(val):
 
 def check_ssrf(send, url, make_callback, was_hit):
     """make_callback(tag) -> (token, callback_url); was_hit(token) -> bool.
-    Plants the callback URL in each likely param; confirmed on a real hit."""
+    Plants the callback URL in each likely param and confirms SSRF two ways,
+    either of which is proof the server fetched our canary:
+      - OUT-OF-BAND: the target connected back to the collaborator (was_hit).
+      - IN-BAND: the target reflected the fetched body, so our token-keyed
+        marker (VAPTSSRFOK:<token>) appears in the response — catches reflective
+        fetchers (e.g. /api/file?path=URL) even when egress blocks the callback
+        path timing."""
     _, q = _params(url)
     out = []
     candidates = [k for k in q if k.lower() in SSRF_PARAMS or _looks_url((q[k] or [""])[0])]
     for key in candidates:
         token, cb = make_callback("ssrf")
         test = _set_param(url, key, cb)
-        send("GET", test)
-        if was_hit(token):
+        r = send("GET", test)
+        inband = f"VAPTSSRFOK:{token}" in ((r or {}).get("text") or "")
+        oob = was_hit(token)
+        if oob or inband:
+            how = ("the fetched response body was reflected back to us (in-band marker observed)"
+                   if inband else "the server connected back to our out-of-band collaborator")
+            ev = (f"in-band marker VAPTSSRFOK:{token} present in response"
+                  if inband else f"OOB callback received for token {token}")
             out.append(_f(
                 f"Server-Side Request Forgery via '{key}'", "hunt-ssrf", "high",
                 "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:L", "confirmed",
-                f"Parameter '{key}' on {url} caused the server to make an outbound request to our "
-                f"controlled canary (OOB callback received). This can reach internal services and "
-                f"cloud metadata.",
-                f"GET {test} → the server connected back to the OOB host.",
-                f"GET {test}", f"OOB callback received for token {token}"))
+                f"Parameter '{key}' on {url} made the server fetch an attacker-controlled URL — "
+                f"{how}. This can reach internal services and cloud metadata.",
+                f"GET {test} → {how}.",
+                f"GET {test}", ev))
     return out
 
 

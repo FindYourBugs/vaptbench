@@ -21,4 +21,6 @@ def oob(token):
                  method=request.method, path=request.full_path[:500])
     db.session.add(hit)
     db.session.commit()
-    return "1", 200
+    # Body carries a token-keyed marker so an SSRF that reflects the fetched
+    # response back to us can be confirmed IN-BAND (not only via the callback).
+    return f"VAPTSSRFOK:{token[:64]}", 200

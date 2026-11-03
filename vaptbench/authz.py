@@ -36,6 +36,7 @@ Disable with VAPT_AUTHZ=0.
 import difflib
 import os
 import re
+import uuid
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 AUTHZ = os.environ.get("VAPT_AUTHZ", "1") != "0"
@@ -189,6 +190,67 @@ def _neighbors(value):
         n = int(value)
         return [str(n + 1), str(n - 1)] if n > 1 else [str(n + 1), str(n + 2)]
     return []
+
+
+def _seed_refs(url):
+    """Known-good object references to try against an object endpoint: a few
+    likely-real emails (derived from the target's own domain) and low integer
+    ids. Used to prove UNAUTHENTICATED object access when we have no crawled
+    reference of our own."""
+    host = urlparse(url).netloc.split(":")[0]
+    dom = host[4:] if host.startswith("www.") else host
+    emails = [f"admin@{dom}", f"administrator@{dom}", f"test@{dom}", f"support@{dom}",
+              "admin@admin.com", "admin@example.com", "test@test.com"]
+    nums = ["1", "2", "3", "1000"]
+    return emails, nums
+
+
+def _seed_ref_bola(send, url, log):
+    """Unauthenticated BOLA: an object endpoint (e.g. /userinfo/{email},
+    /users/id/{id}) returns another principal's PII to an ANONYMOUS request.
+    Confirmed deterministically: a plausible real reference yields a substantial
+    body carrying PII (an email), while a random non-existent reference does NOT
+    — ruling out endpoints that echo or list for any input."""
+    muts = _id_mutators(url)
+    if not muts:
+        return None
+    emails, nums = _seed_refs(url)
+    for val, mutate in muts:
+        bad_email = f"zz{uuid.uuid4().hex[:12]}@no-such-user.invalid"
+        bad_num = str(900000000 + int(uuid.uuid4().int % 90000000))
+        for seeds, bad in ((emails, bad_email), (nums, bad_num)):
+            good = None
+            for s in seeds:
+                surl = mutate(s)
+                if surl == url:
+                    continue
+                r = send("GET", surl, identity=None)
+                if _authorized(r):
+                    b = _body(r)
+                    # PII returned for a specific object: the reference is echoed
+                    # back as data OR an email address is present in the record.
+                    if s.lower() in b.lower() or _emails(b):
+                        good = (s, surl, b)
+                        break
+            if not good:
+                continue
+            # control: a bogus reference must NOT also return a PII-bearing object
+            rb = send("GET", mutate(bad), identity=None)
+            if _authorized(rb) and (bad.lower() in _body(rb).lower() or _emails(_body(rb))):
+                continue                           # returns PII for anything -> not per-object proof
+            s, surl, b = good
+            return _f(
+                f"Unauthenticated BOLA / object access: {urlparse(url).path}",
+                "hunt-idor", "high",
+                f"The object endpoint {url} returns another user's record to an ANONYMOUS request: "
+                f"referencing {s!r} returned a substantial body containing personal data "
+                f"({sorted(_emails(b))[:1] or [s]}), while a random non-existent reference returned "
+                f"nothing — the endpoint resolves direct object references with no authentication or "
+                f"ownership check, so any user's data can be read by supplying their identifier.",
+                f"GET {surl}   (no session) — returns {s}'s record; GET {mutate(bad)} returns nothing.",
+                f"GET {surl}   (anonymous)", b, conf="confirmed",
+                cvss="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N")
+    return None
 
 
 # ----------------------------------------------------------- bypass variants
@@ -462,6 +524,15 @@ def run_authz(send, endpoints, identities, log=None):
                             cvss="CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"))
                         log("hit", "authz", f"★ privilege escalation {drole}->{authorized_roles[0]} ({label}) on {path}")
                     break
+
+        # ---- (6) unauthenticated BOLA by seed reference ---------------------
+        # object endpoint that serves another principal's PII to anonymous.
+        if has_id and ("idor", path) not in emitted and ("seedbola", path) not in emitted:
+            f = _seed_ref_bola(send, url, log)
+            if f:
+                emitted.add(("seedbola", path))
+                findings.append(f)
+                log("hit", "authz", f"★ {f['title']}")
 
         # ---- (5) single-account IDOR: walk the identifier to records the -----
         # session was never issued (owner-mismatch = confirmed; bare enumeration

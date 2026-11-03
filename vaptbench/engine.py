@@ -536,7 +536,7 @@ def _mopup(run, send, endpoints, seen, primary, ctx):
             ctx.injected.add(url)
             _log(run, "test", "inject", f"mop-up Tier-2: {url}")
             for fn in (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
-                       V2.check_time_sqli, V2.check_cmd_injection):
+                       V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output):
                 try:
                     for f in fn(send, url):
                         _add_finding(run, seen, f)
@@ -938,7 +938,7 @@ def _inject_phase(run, send, t, endpoints, identities, seen):
             _log(run, "warn", "inject", "stop requested — halting"); break
         _log(run, "test", "inject", f"[{i}/{len(param_eps)}] injecting {url}")
         checks = (V2.check_ssti, V2.check_lfi, V2.check_nosqli,
-                  V2.check_time_sqli, V2.check_cmd_injection)
+                  V2.check_time_sqli, V2.check_cmd_injection, V2.check_cmd_output)
         hit_classes = set()
         for fn in checks:
             try:

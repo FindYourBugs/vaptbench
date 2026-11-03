@@ -32,8 +32,10 @@ except Exception:                      # PyYAML optional; JSON specs still work
 
 API_INGEST = os.environ.get("VAPT_API_INGEST", "1") != "0"
 PARAM_MINING = os.environ.get("VAPT_PARAM_MINING", "1") != "0"
+MINE_POST = os.environ.get("VAPT_PARAM_MINE_POST", "1") != "0"   # also mine JSON-body params
 _MINE_MAX = int(os.environ.get("VAPT_PARAM_MINE_MAX", "6"))     # endpoints to arjun
 _MINE_TIMEOUT = int(os.environ.get("VAPT_PARAM_MINE_TIMEOUT", "120"))
+_MAX_BODY_FIELDS = int(os.environ.get("VAPT_MAX_BODY_FIELDS", "40"))  # injectable leaves / body
 
 
 def _ok200(r):
@@ -186,9 +188,33 @@ def _example(schema, spec, seen=None, depth=0):
     return "1"                                 # string / unknown -> injectable token
 
 
+def _field_paths(value, prefix=""):
+    """Every string-valued leaf in a synthesised JSON body, as a dotted/bracket
+    path — at ANY nesting depth, inside arrays included:
+
+        {"email": "1"}                       -> ["email"]
+        {"user": {"name": "1"}}               -> ["user.name"]
+        {"items": [{"sku": "1"}]}             -> ["items[0].sku"]
+        {"roles": ["1"]}                      -> ["roles[0]"]
+
+    These are the injectable fields the JSON-body fuzzer mutates one at a time.
+    Top-level-only coverage used to miss every nested object/array field."""
+    out = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            p = f"{prefix}.{k}" if prefix else str(k)
+            out += _field_paths(v, p)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            out += _field_paths(v, f"{prefix}[{i}]")
+    elif isinstance(value, str) and prefix:
+        out.append(prefix)
+    return out[:_MAX_BODY_FIELDS]
+
+
 def _body_op(spec, method, url, op):
     """If the operation documents a JSON request body, synthesise a concrete body
-    and list its injectable (string-valued, top-level) fields."""
+    and list its injectable (string-valued) fields at every nesting depth."""
     schema = None
     # OpenAPI 3: requestBody.content["application/json"].schema
     rb = op.get("requestBody") if isinstance(op, dict) else None
@@ -211,7 +237,7 @@ def _body_op(spec, method, url, op):
     body = _example(schema, spec)
     if not isinstance(body, dict) or not body:
         return None
-    fields = [k for k, v in body.items() if isinstance(v, str)]
+    fields = _field_paths(body)
     if not fields:
         return None
     return {"method": method.upper(), "url": url, "content_type": "application/json",
@@ -322,7 +348,7 @@ def _pm_body_op(method, url, body, variables):
         return None
     if not isinstance(doc, dict) or not doc:
         return None
-    fields = [k for k, v in doc.items() if isinstance(v, str)]
+    fields = _field_paths(doc)
     if not fields:
         return None
     return {"method": method.upper(), "url": url, "content_type": "application/json",
@@ -555,25 +581,42 @@ def _run_arjun(url, method="GET"):
 
 
 def mine_params(endpoints, scope, log):
-    """Discover hidden parameters on the parameter-less endpoints via arjun,
-    returning synthesised ?p=1 URLs ready for the injection tiers."""
+    """Discover hidden parameters on the parameter-less endpoints via arjun.
+    Returns (urls, body_ops):
+      - urls     : synthesised ?p=1 GET URLs for the query-param injection tiers
+      - body_ops : JSON-body operations (POST) for the JSON-body fuzzer, from
+                   params the server only accepts in a request body — surface
+                   that GET mining never reveals."""
     if not (PARAM_MINING and shutil.which("arjun")):
-        return set()
+        return set(), []
     cand = [u for u in endpoints if not urlparse(u).query][:_MINE_MAX]
-    found = set()
+    found, body_ops = set(), []
     for u in cand:
         if not _in(u, scope):
             continue
-        names = _run_arjun(u)
+        names = _run_arjun(u, "GET")
         if names:
             synth = u + ("&" if urlparse(u).query else "?") + urlencode({p: "1" for p in names})
             found.add(synth)
             log("hit", "discover",
-                f"arjun: {u} -> hidden param(s): {', '.join(names[:8])}"
+                f"arjun GET: {u} -> hidden param(s): {', '.join(names[:8])}"
                 + (" …" if len(names) > 8 else ""))
-    if found:
-        log("info", "discover", f"param mining: +{len(found)} endpoint(s) with hidden params")
-    return found
+        if MINE_POST:
+            jnames = _run_arjun(u, "JSON")
+            # only net-new params (a param found for GET is already covered)
+            jnames = [p for p in jnames if p not in (names or [])]
+            if jnames:
+                body = {p: "1" for p in jnames}
+                body_ops.append({"method": "POST", "url": u,
+                                 "content_type": "application/json",
+                                 "body": body, "fields": _field_paths(body)})
+                log("hit", "discover",
+                    f"arjun JSON-body: {u} -> hidden field(s): {', '.join(jnames[:8])}"
+                    + (" …" if len(jnames) > 8 else ""))
+    if found or body_ops:
+        log("info", "discover",
+            f"param mining: +{len(found)} query endpoint(s), +{len(body_ops)} JSON-body op(s)")
+    return found, body_ops
 
 
 # --------------------------------------------------------------- orchestration
@@ -619,7 +662,9 @@ def expand_surface(base_url, send, scope, endpoints, log, param_mining=True):
         try:
             # mine the richer set: original endpoints + newly discovered pages
             mine_set = list(dict.fromkeys(list(endpoints) + list(new_urls)))
-            new_urls |= mine_params(mine_set, scope, log)
+            mined_urls, mined_bops = mine_params(mine_set, scope, log)
+            new_urls |= mined_urls
+            body_ops += mined_bops
         except Exception as e:
             log("warn", "discover", f"param mining error: {e}")
 

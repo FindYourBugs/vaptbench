@@ -28,6 +28,7 @@ from . import verifiers2 as V2
 from . import verifiers3 as V3
 from . import verifiers_post as VP
 from . import verifiers_json as VJ
+from . import verifiers_path as VPath
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
@@ -453,6 +454,10 @@ def _run(app, run_id):
             if API_BODY_FUZZ and body_ops and not run.stop_requested:
                 _api_body_phase(run, send, body_ops, seen, primary)
 
+            # --- Phase 3d3: path-segment injection (REST id in URL path) ---
+            if not run.stop_requested:
+                _path_param_phase(run, send, endpoints, seen, primary)
+
             # --- Phase 3e: control-bypass / payload-variation pass ---------
             if BYPASS_MODE and not run.stop_requested:
                 _variation_phase(run, send, endpoints, seen)
@@ -602,6 +607,47 @@ def _api_body_phase(run, send, body_ops, seen, primary):
                 _add_finding(run, seen, f)
         except Exception as e:
             _log(run, "warn", "inject", f"json-body fuzz error on {op['url']}: {e}")
+        db.session.commit()
+
+
+def _path_param_phase(run, send, endpoints, seen, primary):
+    """Inject into id-like URL path segments (/users/123, /item/4f2a…) — the
+    REST surface the GET-param, POST-form and JSON-body verifiers can't reach
+    because the input is a path segment, not a query param or body field."""
+    cand = []
+    seen_paths = set()
+    for u in endpoints:
+        if is_static_asset(u):
+            continue
+        try:
+            path = urlparse(u).path
+        except Exception:
+            continue
+        if not VPath.candidate_indices(path):
+            continue
+        key = (urlparse(u).netloc, path)       # one representative per path shape
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        cand.append(u)
+    cand = cand[:MAX_INJECT_ENDPOINTS]
+    if not cand:
+        return
+    _log(run, "info", "inject",
+         f"Path-segment injection ({len(cand)} endpoint(s) with id-like path segs)...")
+
+    def psend(method, url, headers="", body=""):
+        return send(method, url, headers=headers, body=body, identity=primary)
+
+    for u in cand:
+        if run.stop_requested:
+            break
+        _log(run, "test", "inject", f"path-seg: {urlparse(u).path}")
+        try:
+            for f in VPath.check_path_params(psend, u):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "inject", f"path-seg error on {u}: {e}")
         db.session.commit()
 
 

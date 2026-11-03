@@ -200,8 +200,23 @@ missed (Phase 2b, `discovery.py`):
   answers, the endpoint enters the test surface (and the deterministic
   introspection verifier flags it).
 - **Hidden-parameter mining** — runs **arjun** on parameter-less endpoints to
-  find params that exist server-side but appear in no form or link, then
-  synthesises `?p=1` URLs for the injection tiers.
+  find params that exist server-side but appear in no form or link. It mines
+  both **query** params (→ synthesised `?p=1` URLs for the injection tiers) and
+  **JSON request-body** params (`-m JSON` → a `POST` body-op for the JSON-body
+  fuzzer), so body-only fields that never show up in a link are reached too.
+  Toggle the body pass with `VAPT_PARAM_MINE_POST=0`.
+
+**Reaching every parameter.** Parameters enter the fuzzers from eight sources
+(crawl, sitemap, OpenAPI, Postman, GraphQL, HTML forms, arjun, SPA XHR capture),
+and three mechanisms make sure none of the *discovered* ones are skipped:
+- **Nested / array JSON-body fields** — the JSON-body fuzzer injects into every
+  string leaf at any depth, inside arrays included (`user.name`, `items[0].sku`,
+  `roles[0]`), not just top-level keys. (`VAPT_MAX_BODY_FIELDS`, default 40.)
+- **JSON-body hidden-param mining** — see above (`arjun -m JSON`).
+- **Path-segment injection** — REST identifiers carried in the URL path
+  (`/users/123`, `/item/4f2a…`, Mongo ObjectIds, UUIDs) are injected directly
+  into the path segment (error-SQLi + reflected-XSS, confirmed deterministically)
+  — surface the query/form/body verifiers can't reach (Phase 3d3, `verifiers_path.py`).
 
 A **deeper authenticated crawl** also runs in the base mapping step: instead of
 one level, the engine does a breadth-first crawl to `VAPT_CRAWL_DEPTH` levels

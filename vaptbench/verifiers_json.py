@@ -16,8 +16,30 @@ documented method (POST/PUT/PATCH).
 """
 import copy
 import json
+import re
 
 from .verifiers import SQL_ERRORS, XSS_MARK, XSS_PAYLOAD
+
+_PATH_TOK = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
+
+
+def _parse_path(path):
+    """'user.name' -> ['user','name'];  'items[0].sku' -> ['items',0,'sku']."""
+    toks = []
+    for m in _PATH_TOK.finditer(path):
+        toks.append(m.group(1) if m.group(1) is not None else int(m.group(2)))
+    return toks or [path]
+
+
+def _set_by_path(body, path, value):
+    """Set a (possibly nested/indexed) field in a deep-copied body. A plain
+    top-level key round-trips exactly as before."""
+    toks = _parse_path(path)
+    node = body
+    for t in toks[:-1]:
+        node = node[t]
+    node[toks[-1]] = value
+    return body
 
 _JSON_HDR = "Content-Type: application/json"
 # SSTI: unique marker * square, evaluated only if the template engine runs it
@@ -28,14 +50,12 @@ _SSTI_RESULT = str(_SSTI_A * _SSTI_B)       # "2401"
 
 
 def _send(send, op, field, value):
-    body = copy.deepcopy(op["body"])
-    body[field] = value
+    body = _set_by_path(copy.deepcopy(op["body"]), field, value)
     return send(op["method"], op["url"], headers=_JSON_HDR, body=json.dumps(body))
 
 
 def _poc(op, field, value):
-    body = copy.deepcopy(op["body"])
-    body[field] = value
+    body = _set_by_path(copy.deepcopy(op["body"]), field, value)
     return f"{op['method']} {op['url']}\n{_JSON_HDR}\n\n{json.dumps(body)}"
 
 

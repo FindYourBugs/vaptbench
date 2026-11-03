@@ -148,6 +148,42 @@ def _set_path_seg(url, idx, value):
     return urlunparse(p._replace(path="/".join(segs)))
 
 
+def _set_query(url, key, value):
+    p = urlparse(url)
+    q = [(k, str(value) if k == key else v)
+         for k, v in parse_qsl(p.query, keep_blank_values=True)]
+    return urlunparse(p._replace(query=urlencode(q)))
+
+
+def _id_mutators(url):
+    """Every id token in the URL as (value, mutate(new_value)->url) pairs."""
+    out = []
+    for idx, val in _path_ids(url):
+        out.append((val, lambda nv, i=idx: _set_path_seg(url, i, nv)))
+    for key, val in _query_ids(url):
+        if str(val).isdigit() or _UUID.match(val) or _HEX.match(val):
+            out.append((val, lambda nv, k=key: _set_query(url, k, nv)))
+    return out
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _emails(text):
+    return set(m.lower() for m in _EMAIL_RE.findall(text or ""))
+
+
+def _actor_names(ident):
+    """Identity tokens for the logged-in user (username + email local-part),
+    used to tell 'my own record' from 'someone else's'."""
+    u = (getattr(ident, "username", "") or "").strip().lower()
+    toks = set()
+    if u:
+        toks.add(u)
+        toks.add(u.split("@")[0])
+    return {t for t in toks if len(t) >= 3}
+
+
 def _neighbors(value):
     if str(value).isdigit():
         n = int(value)
@@ -212,6 +248,71 @@ def _try_bypass(send, url, identity, target_body):
 
 
 # ----------------------------------------------------------- findings
+def _single_account_idor(send, url, actor, base_resp):
+    """Prove IDOR with ONE account by walking the object identifier to records the
+    session was never issued. Returns a finding dict or None. `base_resp` is the
+    actor's response for `url` as crawled (assumed the actor's own object)."""
+    base = _body(base_resp)
+    base_emails = _emails(base)
+    mine = _actor_names(actor)
+    # baseline must look like the actor's OWN record (carries their identity), so a
+    # different owner on a neighbour is meaningful.
+    looks_mine = bool(base_emails) or any(m in base.lower() for m in mine)
+    distinct = 0
+    first_distinct = None
+    for val, mutate in _id_mutators(url):
+        if not str(val).isdigit():
+            continue                              # only enumerate predictable ids
+        for nb in _neighbors(val):
+            nurl = mutate(nb)
+            if nurl == url:
+                continue
+            r = send("GET", nurl, identity=actor)
+            if not _authorized(r):
+                continue
+            nbody = _body(r)
+            # OWNER MISMATCH: the neighbour object carries a different owner's
+            # identity than the actor's -> provably another user's record. Checked
+            # BEFORE any similarity skip: a shared template with a different owner
+            # email is still someone else's record.
+            foreign = {e for e in _emails(nbody)
+                       if not any(m in e for m in mine) and e not in base_emails}
+            if foreign and looks_mine:
+                owner = sorted(foreign)[0]
+                return _f(
+                    f"IDOR (single account, owner mismatch): {urlparse(url).path}",
+                    "hunt-idor", "high",
+                    f"Using one authenticated session ('{_role(actor)}'), changing the object "
+                    f"identifier in {url} to {nb} returned a record owned by a DIFFERENT user "
+                    f"({owner}) — not the logged-in user. The endpoint resolves direct object "
+                    f"references without checking ownership, so any user's record can be read by "
+                    f"walking the identifier. (Anonymous access to this endpoint is denied, so the "
+                    f"control exists but is not per-object.)",
+                    f"Log in as '{_role(actor)}', GET {url} (your record), then GET {nurl} — a "
+                    f"different user's record ({owner}) is returned.",
+                    f"GET {nurl}   (as {_role(actor)}; object not owned by this user)",
+                    nbody, conf="confirmed",
+                    cvss="CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N")
+            # otherwise: a distinct valid object (not an echo of ours) is evidence
+            # of enumerable references, kept as needs-review without an owner field.
+            if not _same_content(nbody, base):
+                distinct += 1
+                first_distinct = first_distinct or (nurl, nbody)
+    if distinct >= 1:
+        nurl, nbody = first_distinct
+        return _f(
+            f"Enumerable object references (single account): {urlparse(url).path}",
+            "hunt-idor", "medium",
+            f"With one authenticated session, adjacent identifiers at {url} return different valid "
+            f"objects the session was not issued (the endpoint denies anonymous access, so it is "
+            f"gated, yet serves arbitrary object IDs). No owner-identity field was present to prove "
+            f"the record belongs to another user automatically — confirm by comparing the returned "
+            f"data, or supply a second role for automatic cross-user proof.",
+            f"GET {url} then increment/decrement the identifier (e.g. {nurl}).",
+            f"GET {nurl}", nbody, conf="needs-review")
+    return None
+
+
 def _f(title, cls, sev, desc, steps, req, resp, conf="confirmed", cvss=""):
     return dict(title=title, vuln_class=cls, severity=sev, confidence=conf,
                 cvss=cvss, description=desc, steps=steps, poc_request=req,
@@ -253,10 +354,10 @@ def run_authz(send, endpoints, identities, log=None):
         has_id = _has_object_id(url)
 
         # ---- (3/4) authentication -------------------------------------------
-        # a page served identically to everyone is only a finding when it is
-        # plausibly private (a sensitive path or an object reference) — a public
-        # page shown to all is not "missing authentication".
-        if authorized_roles and anon_ok and (_SENSITIVE.search(path) or has_id):
+        # a page served identically to everyone is only a finding when its path is
+        # plausibly private — a public page (incl. public /items/<id> catalog
+        # pages) shown to all is not "missing authentication".
+        if authorized_roles and anon_ok and _SENSITIVE.search(path):
             ref = _body(resp[authorized_roles[0]])
             if _same_content(_body(anon), ref):
                 key = ("auth", path)
@@ -362,29 +463,18 @@ def run_authz(send, endpoints, identities, log=None):
                         log("hit", "authz", f"★ privilege escalation {drole}->{authorized_roles[0]} ({label}) on {path}")
                     break
 
-        # ---- (5) enumerable references (only one role to prove with) --------
-        if has_id and _path_ids(url) and len(authed) < 2 and authorized_roles:
-            idx, val = _path_ids(url)[0]
-            if str(val).isdigit():
-                distinct = 0
-                base_body = _body(resp[authorized_roles[0]])
-                for nb in _neighbors(val):
-                    rn = send("GET", _set_path_seg(url, idx, nb), identity=authed[0])
-                    if _authorized(rn) and not _same_content(_body(rn), base_body):
-                        distinct += 1
-                if distinct >= 1:
-                    key = ("enum", path)
-                    if key not in emitted:
-                        emitted.add(key)
-                        findings.append(_f(
-                            f"Enumerable object references: {path}",
-                            "hunt-idor", "medium",
-                            f"{url} exposes a sequential numeric identifier; adjacent IDs return "
-                            f"different valid objects. With a second user account this should be "
-                            f"confirmed as IDOR — provide another role to prove cross-user access.",
-                            f"GET {url} then increment/decrement the identifier.",
-                            f"GET {_set_path_seg(url, idx, _neighbors(val)[0])}", "",
-                            conf="needs-review"))
-                        log("hit", "authz", f"? enumerable references on {path}")
+        # ---- (5) single-account IDOR: walk the identifier to records the -----
+        # session was never issued (owner-mismatch = confirmed; bare enumeration
+        # = needs-review). Runs on any gated object endpoint, even with one role.
+        if has_id and _denied(anon) and authorized_roles and ("idor", path) not in emitted:
+            actor = next((i for i in authed if _role(i) == authorized_roles[0]), authed[0])
+            f = _single_account_idor(send, url, actor, resp[authorized_roles[0]])
+            if f:
+                key = ("idor", path) if f["confidence"] == "confirmed" else ("enum", path)
+                if key not in emitted:
+                    emitted.add(key)
+                    findings.append(f)
+                    mark = "★" if f["confidence"] == "confirmed" else "?"
+                    log("hit", "authz", f"{mark} {f['title']}")
 
     return findings

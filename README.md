@@ -278,6 +278,12 @@ bare 200:
   `?id=…`) that is gated against the anonymous user but serves user A's object to a
   *different* authenticated user B → confirmed cross-user access. Also notes when
   identifiers are **enumerable** (an adjacent ID returns a different object).
+- **Single-account IDOR** — proves IDOR with **one** set of credentials: on a gated
+  object endpoint, it walks the identifier (id±1, …) as the logged-in user and, if a
+  neighbouring record carries a **different owner's identity** (e.g. another user's
+  email) than the session's, confirms IDOR outright. Without an owner field it
+  reports enumerable references as `needs-review`. (Two roles still give the cleaner
+  cross-user proof, but are not required.)
 - **Vertical privilege escalation / BFLA** — an endpoint the app itself denies to a
   role (so a control provably exists) that the same role then reaches via a bypass
   variant returning the privileged body.

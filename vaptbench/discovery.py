@@ -9,9 +9,10 @@ Three best-effort, scope-checked sources, each degrading gracefully to nothing
   3. hidden-parameter mining (arjun)        -> parameters that exist server-side but
                                                appear in no form or link
 
-`expand_surface` returns (new_urls, post_methods, notes):
+`expand_surface` returns (new_urls, post_methods, body_ops, notes):
   - new_urls      : set[str] of in-scope endpoint URLs to merge into the run
   - post_methods  : list[(METHOD, url)] non-GET operations worth replaying
+  - body_ops      : list[dict] documented ops with a synthesised JSON body to fuzz
   - notes         : list[(kind, url, detail)] for logging / exposure findings
 """
 import json
@@ -131,8 +132,95 @@ def _spec_base(spec, base_url):
     return base_url if base_url.endswith("/") else base_url + "/"
 
 
+def _resolve_ref(spec, ref):
+    """Resolve a local JSON pointer ('#/components/schemas/X' or '#/definitions/X')."""
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
+    node = spec
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def _example(schema, spec, seen=None, depth=0):
+    """Build a concrete example value from a JSON schema (OpenAPI 3 / Swagger 2),
+    resolving $ref. Strings default to '1' so they round-trip as injectable values."""
+    if not isinstance(schema, dict) or depth > 6:
+        return "1"
+    if "$ref" in schema:
+        seen = seen or set()
+        ref = schema["$ref"]
+        if ref in seen:                        # guard against recursive schemas
+            return {}
+        seen = seen | {ref}
+        return _example(_resolve_ref(spec, ref) or {}, spec, seen, depth + 1)
+    if "example" in schema and not isinstance(schema["example"], (dict, list)):
+        return schema["example"]
+    if schema.get("enum"):
+        return schema["enum"][0]
+    for comb in ("allOf", "oneOf", "anyOf"):
+        if isinstance(schema.get(comb), list) and schema[comb]:
+            merged = {}
+            for sub in (schema[comb] if comb == "allOf" else schema[comb][:1]):
+                v = _example(sub, spec, seen, depth + 1)
+                if isinstance(v, dict):
+                    merged.update(v)
+            if merged or comb != "allOf":
+                return merged or _example(schema[comb][0], spec, seen, depth + 1)
+    t = schema.get("type")
+    if t == "object" or (t is None and "properties" in schema):
+        out = {}
+        for name, sub in (schema.get("properties") or {}).items():
+            out[name] = _example(sub, spec, seen, depth + 1)
+        return out
+    if t == "array":
+        return [_example(schema.get("items") or {}, spec, seen, depth + 1)]
+    if t in ("integer", "number"):
+        return 1
+    if t == "boolean":
+        return True
+    return "1"                                 # string / unknown -> injectable token
+
+
+def _body_op(spec, method, url, op):
+    """If the operation documents a JSON request body, synthesise a concrete body
+    and list its injectable (string-valued, top-level) fields."""
+    schema = None
+    # OpenAPI 3: requestBody.content["application/json"].schema
+    rb = op.get("requestBody") if isinstance(op, dict) else None
+    if isinstance(rb, dict):
+        if "$ref" in rb:
+            rb = _resolve_ref(spec, rb["$ref"]) or rb
+        content = (rb.get("content") or {}) if isinstance(rb, dict) else {}
+        for ct in ("application/json", "application/*+json", "*/*"):
+            if ct in content and isinstance(content[ct], dict):
+                schema = content[ct].get("schema")
+                break
+    # Swagger 2: a parameter with in == "body"
+    if schema is None:
+        for prm in (op.get("parameters") if isinstance(op, dict) else None) or []:
+            if isinstance(prm, dict) and prm.get("in") == "body":
+                schema = prm.get("schema")
+                break
+    if schema is None:
+        return None
+    body = _example(schema, spec)
+    if not isinstance(body, dict) or not body:
+        return None
+    fields = [k for k, v in body.items() if isinstance(v, str)]
+    if not fields:
+        return None
+    return {"method": method.upper(), "url": url, "content_type": "application/json",
+            "body": body, "fields": fields}
+
+
 def ingest_openapi(base_url, send, scope, log):
-    """Return (urls, post_methods, note) from the first reachable OpenAPI/Swagger doc."""
+    """Return (urls, post_methods, body_ops, note) from the first reachable
+    OpenAPI/Swagger doc. body_ops carry synthesised JSON bodies for fuzzing."""
     for p in _OPENAPI_PATHS:
         u = urljoin(base_url if base_url.endswith("/") else base_url + "/", p)
         if not _in(u, scope):
@@ -144,7 +232,7 @@ def ingest_openapi(base_url, send, scope, log):
         if not spec or not isinstance(spec.get("paths"), dict):
             continue
         sbase = _spec_base(spec, base_url)
-        urls, post_methods = set(), []
+        urls, post_methods, body_ops = set(), [], []
         for path, item in spec["paths"].items():
             if not isinstance(item, dict):
                 continue
@@ -161,11 +249,16 @@ def ingest_openapi(base_url, send, scope, log):
                         qp[prm.get("name", "q")] = "1"
                 if meth.lower() in ("post", "put", "patch", "delete"):
                     post_methods.append((meth.upper(), full))
+                    bop = _body_op(spec, meth, full, op)
+                    if bop:
+                        body_ops.append(bop)
             urls.add(full + ("?" + urlencode(qp) if qp else ""))
         if urls:
-            log("hit", "discover", f"OpenAPI/Swagger at /{p}: +{len(urls)} documented route(s)")
-            return urls, post_methods, ("openapi", u, f"{len(urls)} documented route(s)")
-    return set(), [], None
+            extra = f", {len(body_ops)} with JSON body" if body_ops else ""
+            log("hit", "discover",
+                f"OpenAPI/Swagger at /{p}: +{len(urls)} documented route(s){extra}")
+            return urls, post_methods, body_ops, ("openapi", u, f"{len(urls)} documented route(s)")
+    return set(), [], [], None
 
 
 # --------------------------------------------------------------- GraphQL
@@ -245,8 +338,9 @@ def mine_params(endpoints, scope, log):
 
 # --------------------------------------------------------------- orchestration
 def expand_surface(base_url, send, scope, endpoints, log, param_mining=True):
-    """Run all deep-discovery sources. Returns (new_urls, post_methods, notes)."""
-    new_urls, post_methods, notes = set(), [], []
+    """Run all deep-discovery sources.
+    Returns (new_urls, post_methods, body_ops, notes)."""
+    new_urls, post_methods, body_ops, notes = set(), [], [], []
 
     try:
         new_urls |= ingest_sitemaps(base_url, send, scope, log)
@@ -255,9 +349,10 @@ def expand_surface(base_url, send, scope, endpoints, log, param_mining=True):
 
     if API_INGEST:
         try:
-            u, pm, note = ingest_openapi(base_url, send, scope, log)
+            u, pm, bops, note = ingest_openapi(base_url, send, scope, log)
             new_urls |= u
             post_methods += pm
+            body_ops += bops
             if note:
                 notes.append(note)
         except Exception as e:
@@ -278,4 +373,4 @@ def expand_surface(base_url, send, scope, endpoints, log, param_mining=True):
         except Exception as e:
             log("warn", "discover", f"param mining error: {e}")
 
-    return new_urls, post_methods, notes
+    return new_urls, post_methods, body_ops, notes

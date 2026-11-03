@@ -27,6 +27,7 @@ from . import verifiers as V
 from . import verifiers2 as V2
 from . import verifiers3 as V3
 from . import verifiers_post as VP
+from . import verifiers_json as VJ
 from . import ai_tester
 from . import ai as ai_mod
 from . import agent as agent_mod
@@ -38,6 +39,7 @@ from . import bypass as bypass_mod
 from . import upload as upload_mod
 from . import netscan
 from . import net_verifiers as NV
+from . import jslibs
 from .scope import in_scope
 from .skills import load_playbook
 
@@ -52,6 +54,7 @@ BYPASS_MODE = os.environ.get("VAPT_BYPASS", "1") != "0"   # filter/WAF bypass pa
 BYPASS_TIMING = os.environ.get("VAPT_BYPASS_TIMING", "1") != "0"  # include slow cmd-timing variants
 MAX_BYPASS_ENDPOINTS = int(os.environ.get("VAPT_BYPASS_MAX", "10"))
 UPLOAD_MODE = os.environ.get("VAPT_UPLOAD", "1") != "0"   # file-upload bypass tester
+API_BODY_FUZZ = os.environ.get("VAPT_API_BODY_FUZZ", "1") != "0"  # inject into OpenAPI JSON bodies
 WEB_INFRA = os.environ.get("VAPT_WEB_INFRA", "1") != "0"  # hybrid: port-scan the web host too
 WEB_INFRA_PORTS = os.environ.get("VAPT_WEB_INFRA_PORTS", "top1000")
 WEB_NUCLEI = os.environ.get("VAPT_WEB_NUCLEI", "1") != "0" and shutil.which("nuclei")  # CVE/tech templates
@@ -60,6 +63,8 @@ MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
 
 MAX_ENDPOINTS = int(os.environ.get("VAPT_MAX_ENDPOINTS", "60"))
+CRAWL_DEPTH = int(os.environ.get("VAPT_CRAWL_DEPTH", "2"))    # authenticated BFS depth
+CRAWL_BUDGET = int(os.environ.get("VAPT_CRAWL_BUDGET", "40"))  # max pages fetched while crawling
 LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\'#?\s][^"\']*)["\']', re.I)
 ASSET_RE = re.compile(
     r"\.(?:js|mjs|css|map|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|mp4|webm)(?:$|\?)", re.I)
@@ -171,23 +176,42 @@ def _discover(base_url, base_html, scope_rules, run, send=None, primary=None,
     if upload_forms is not None:
         upload_forms += forms_mod.upload_forms(base_html, base_url)
 
-    # One level deeper, authenticated: the entry page (login, landing) rarely
-    # links straight to the injectable pages — fetch the pages it does link to
-    # (as the logged-in user) and harvest THEIR links + form parameters. This is
-    # what gets us from login.php/index to /vulnerabilities/sqli/?id=... .
-    if send is not None:
-        frontier = [u for u in list(found) if u != base_url and not is_static_asset(u)][:15]
-        for u in frontier:
+    # Deeper, authenticated BFS: the entry page (login, landing) rarely links
+    # straight to the injectable pages — crawl the pages it links to (as the
+    # logged-in user) and harvest THEIR links + form parameters, to CRAWL_DEPTH
+    # levels within a page budget. This is what gets us from login.php/index to
+    # /vulnerabilities/sqli/?id=... and beyond (nested menus, admin sub-sections).
+    if send is not None and CRAWL_DEPTH >= 1:
+        visited = {base_url}
+        frontier = [(u, 1) for u in sorted(found)
+                    if u != base_url and not is_static_asset(u) and _same_origin(u, base_url)]
+        fetched = 0
+        while frontier and fetched < CRAWL_BUDGET:
             if run.stop_requested:
                 break
+            u, depth = frontier.pop(0)
+            if u in visited or depth > CRAWL_DEPTH:
+                continue
+            visited.add(u)
+            fetched += 1
             r = send("GET", u, identity=primary)
             body = r.get("text") or ""
-            if r.get("ok") and ("<html" in body[:4000].lower() or "<form" in body.lower()):
-                found |= _page_links(body, u, base_url)
-                if post_forms is not None:
-                    post_forms += forms_mod.post_forms(body, u)
-                if upload_forms is not None:
-                    upload_forms += forms_mod.upload_forms(body, u)
+            if not (r.get("ok") and ("<html" in body[:4000].lower() or "<form" in body.lower())):
+                continue
+            links = _page_links(body, u, base_url)
+            found |= links
+            if post_forms is not None:
+                post_forms += forms_mod.post_forms(body, u)
+            if upload_forms is not None:
+                upload_forms += forms_mod.upload_forms(body, u)
+            if depth < CRAWL_DEPTH:
+                for nu in sorted(links):
+                    if (nu not in visited and not is_static_asset(nu)
+                            and _same_origin(nu, base_url)):
+                        frontier.append((nu, depth + 1))
+        _log(run, "info", "recon",
+             f"authenticated crawl: depth {CRAWL_DEPTH}, {fetched} page(s) fetched, "
+             f"{len(found)} URL(s) mapped")
 
     # Light katana crawl if available (depth 1); non-fatal if missing.
     res = run_tool("katana", base_url, scope_rules)
@@ -266,12 +290,12 @@ def _deep_discovery(run, send, t, endpoints, primary, scope, seen, post_forms):
         return send(method, url, headers=headers, body=body, identity=primary)
 
     try:
-        new_urls, post_methods, notes = discovery_mod.expand_surface(
+        new_urls, post_methods, body_ops, notes = discovery_mod.expand_surface(
             t.base_url, dsend, scope, endpoints,
             lambda lvl, ph, msg: _log(run, lvl, ph, msg))
     except Exception as e:
         _log(run, "warn", "discover", f"deep discovery error: {e}")
-        return endpoints
+        return endpoints, []
 
     existing = set(endpoints)
     added = 0
@@ -322,7 +346,7 @@ def _deep_discovery(run, send, t, endpoints, primary, scope, seen, post_forms):
     for u in sorted(new_urls, key=lambda u: (0 if urlparse(u).query else 1, len(u))) + endpoints:
         if u not in merged:
             merged.add(u); out.append(u)
-    return out[:MAX_ENDPOINTS]
+    return out[:MAX_ENDPOINTS], body_ops
 
 
 def _run(app, run_id):
@@ -379,9 +403,10 @@ def _run(app, run_id):
             # Deep discovery: sitemap/robots, OpenAPI/Swagger + GraphQL ingestion,
             # and hidden-parameter mining — close the "did we reach every page /
             # param / API route" gap before testing begins.
+            body_ops = []
             if DEEP_DISCOVERY:
-                endpoints = _deep_discovery(run, send, t, endpoints, primary, scope,
-                                            seen, post_forms)
+                endpoints, body_ops = _deep_discovery(run, send, t, endpoints, primary,
+                                                      scope, seen, post_forms)
 
             # Passive checks on the base response (phase back to recon so these
             # findings are attributed correctly, not to the SPA sub-phase).
@@ -422,6 +447,10 @@ def _run(app, run_id):
             # --- Phase 3d: POST-form injection -----------------------------
             if not run.stop_requested:
                 _post_inject_phase(run, send, post_forms, seen, t.base_url)
+
+            # --- Phase 3d2: OpenAPI JSON request-body fuzzing --------------
+            if API_BODY_FUZZ and body_ops and not run.stop_requested:
+                _api_body_phase(run, send, body_ops, seen, primary)
 
             # --- Phase 3e: control-bypass / payload-variation pass ---------
             if BYPASS_MODE and not run.stop_requested:
@@ -536,6 +565,38 @@ def _post_inject_phase(run, send, post_forms, seen, base_url):
                 _add_finding(run, seen, f)
         except Exception as e:
             _log(run, "warn", "inject", f"post-inject error on {form['action']}: {e}")
+        db.session.commit()
+
+
+def _api_body_phase(run, send, body_ops, seen, primary):
+    """Fuzz the JSON request bodies of OpenAPI/Swagger-documented operations
+    (SQLi / SSTI / XSS into each string field) — API surface the GET-param and
+    POST-form verifiers can't reach because the input is a JSON body."""
+    uniq, done = [], set()
+    for op in body_ops:
+        key = (op["method"], op["url"], tuple(sorted(op.get("fields") or [])))
+        if key in done or not op.get("fields"):
+            continue
+        done.add(key)
+        uniq.append(op)
+    if not uniq:
+        return
+    _log(run, "info", "inject",
+         f"OpenAPI JSON-body fuzzing ({len(uniq)} documented operation(s))...")
+
+    def jsend(method, url, headers="", body=""):
+        return send(method, url, headers=headers, body=body, identity=primary)
+
+    for op in uniq[:MAX_INJECT_ENDPOINTS]:
+        if run.stop_requested:
+            break
+        _log(run, "test", "inject",
+             f"{op['method']} {urlparse(op['url']).path} json-fields={op['fields']}")
+        try:
+            for f in VJ.check_json_body(jsend, op):
+                _add_finding(run, seen, f)
+        except Exception as e:
+            _log(run, "warn", "inject", f"json-body fuzz error on {op['url']}: {e}")
         db.session.commit()
 
 
@@ -711,6 +772,13 @@ def _cve_phase(run, send, t, scope, seen, base):
         _tech_fingerprint(run, seen, base)
     except Exception as e:
         _log(run, "warn", "cve", f"fingerprint error: {e}")
+    # client-side JS library CVEs (retire.js-style, self-contained)
+    try:
+        for f in jslibs.scan(send, t.base_url, base.get("text") or "",
+                             log=lambda l, p, m: _log(run, l, p, m)):
+            _add_finding(run, seen, f)
+    except Exception as e:
+        _log(run, "warn", "cve", f"JS-library scan error: {e}")
     if not WEB_NUCLEI:
         return
     ok, _why = in_scope(t.base_url, scope)

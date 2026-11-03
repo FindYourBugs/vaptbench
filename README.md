@@ -195,10 +195,25 @@ missed (Phase 2b, `discovery.py`):
   find params that exist server-side but appear in no form or link, then
   synthesises `?p=1` URLs for the injection tiers.
 
+A **deeper authenticated crawl** also runs in the base mapping step: instead of
+one level, the engine does a breadth-first crawl to `VAPT_CRAWL_DEPTH` levels
+(default 2) within a page budget (`VAPT_CRAWL_BUDGET`, default 40), fetching each
+page **as the logged-in user** and harvesting its links, POST forms and upload
+forms — so nested menus and admin sub-sections behind the landing page are reached.
+
 Toggle with `VAPT_DEEP_DISCOVERY=0` (whole phase), `VAPT_API_INGEST=0`
 (OpenAPI/GraphQL), `VAPT_PARAM_MINING=0` (arjun). `VAPT_MAX_ENDPOINTS` caps the
 merged surface (default 60); `VAPT_PARAM_MINE_MAX` caps how many endpoints arjun
-runs on (default 6).
+runs on (default 6); `VAPT_CRAWL_DEPTH` / `VAPT_CRAWL_BUDGET` tune the crawl.
+
+### OpenAPI request-body fuzzing (Phase 3d2)
+When an OpenAPI/Swagger spec documents operations with a JSON request body, the
+engine synthesises a concrete body from the schema (resolving `$ref`s) and injects
+into each string field under the documented method (`verifiers_json.py`): error-
+based **SQLi**, **SSTI** (arithmetic marker evaluated, literal absent) and
+reflected **XSS** (only when the response is served as HTML). This reaches the API
+surface the GET-param and POST-form verifiers can't, because the input is a JSON
+body. Toggle with `VAPT_API_BODY_FUZZ=0`.
 
 ## Control-bypass / payload-variation engine
 A single baseline payload misses anything behind partial sanitisation or a WAF.
@@ -255,6 +270,12 @@ open, folding those findings into the same report. Toggle with `VAPT_WEB_INFRA=0
   (previously network-only). CVE template hits are tagged as **Known Vulnerability
   (CVE)**; info-level detections are logged to the feed but kept out of the report
   so real findings aren't buried. Toggle with `VAPT_WEB_NUCLEI=0`.
+- **Client-side JS library CVEs** (`jslibs.py`, retire.js-style, self-contained) —
+  detects each front-end library + version from `<script src>` filenames and from
+  the version banners in script bodies (jQuery, AngularJS, Bootstrap, lodash,
+  Moment, Handlebars, DOMPurify, axios, …), then reports any version below a known-
+  fixed release (CWE-1395 / A06) with the specific CVE IDs. Needs no external
+  binary; only same-origin scripts are fetched. Toggle with `VAPT_JS_CVE=0`.
 
 ## Autonomous engine (Start VAPT)
 Click **Start VAPT** on a target and the engine runs the whole web VAPT in the

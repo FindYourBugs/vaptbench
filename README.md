@@ -35,11 +35,19 @@ python vapt.py https://shop.example.com/ \
     --login-url https://shop.example.com/login \
     --report report.md
 python vapt.py https://target/ --no-agent        # deterministic only
+python vapt.py https://api.target/ --postman collection.json   # + Postman surface
+python vapt.py https://target/ --ci --fail-on high             # CI gate (exit code)
 ```
 It streams the live feed, prints a findings summary, and (with `--report`) writes
 a report. `--role ROLE:USER:PASS` repeatable; `--auth auto|form|bearer|cookie|
 basic`; `--scope RULE` repeatable (defaults to the target host). Uses a throwaway
 temp DB unless you pass `--db`.
+
+**CI gate** — `--ci` turns the run into a build gate: it exits **2** if any
+**confirmed** finding is at or above `--fail-on` (default `low`), **1** if the run
+errored, **0** if clean. Only *proven* findings gate the build — needs-review ones
+never break CI. A ready-to-use GitHub Actions workflow is in
+[`.github/workflows/vaptbench.yml`](.github/workflows/vaptbench.yml).
 
 ### Reports (format by extension)
 ```bash
@@ -205,6 +213,12 @@ Toggle with `VAPT_DEEP_DISCOVERY=0` (whole phase), `VAPT_API_INGEST=0`
 (OpenAPI/GraphQL), `VAPT_PARAM_MINING=0` (arjun). `VAPT_MAX_ENDPOINTS` caps the
 merged surface (default 60); `VAPT_PARAM_MINE_MAX` caps how many endpoints arjun
 runs on (default 6); `VAPT_CRAWL_DEPTH` / `VAPT_CRAWL_BUDGET` tune the crawl.
+
+- **Postman collection ingestion** — pass `--postman collection.json` (or set
+  `VAPT_POSTMAN`) and the engine parses a Postman v2.x export the same way it does
+  OpenAPI: `{{variable}}` substitution, folder recursion, every request becomes a
+  scope-checked testable URL, and raw-JSON bodies feed the JSON-body fuzzer. Clients
+  often hand over a Postman export instead of a spec.
 
 ### OpenAPI request-body fuzzing (Phase 3d2)
 When an OpenAPI/Swagger spec documents operations with a JSON request body, the

@@ -242,6 +242,14 @@ def main(argv=None):
                          "a range/list like 1-65535 or 22,80,8443")
     ap.add_argument("--no-agent", action="store_true",
                     help="disable the LLM agent; run the deterministic sweep only")
+    ap.add_argument("--postman", default="", metavar="PATH",
+                    help="Postman collection (v2.x JSON) to ingest as extra API surface")
+    ap.add_argument("--ci", action="store_true",
+                    help="CI gate: exit non-zero if confirmed findings meet --fail-on "
+                         "(2 = gated findings, 1 = run error, 0 = clean)")
+    ap.add_argument("--fail-on", default="low",
+                    choices=["critical", "high", "medium", "low", "none"],
+                    help="severity threshold for --ci (default low = any confirmed finding)")
     ap.add_argument("--report", default="", metavar="PATH",
                     help="write a report; extension picks format: .pdf (branded, "
                          "needs Chromium) | .html | .md")
@@ -275,6 +283,10 @@ def main(argv=None):
 
     if args.ports:
         os.environ["VAPT_NET_PORTS_SPEC"] = args.ports
+    if args.postman:
+        if not os.path.isfile(args.postman):
+            ap.error(f"--postman file not found: {args.postman}")
+        os.environ["VAPT_POSTMAN"] = os.path.abspath(args.postman)
     if args.no_agent:
         os.environ["VAPT_AGENT"] = "0"
     if args.db:
@@ -350,7 +362,35 @@ def main(argv=None):
                     "client": args.client or host, "logo": args.logo,
                     "target": args.target, "scope": scope.replace(chr(10), ", ")}
             _write_report(app, rid, args.target, args.report, meta)
+        if args.ci:
+            return _ci_gate(app, rid, args.fail_on)
     return 0
+
+
+def _ci_gate(app, rid, fail_on):
+    """CI exit code: 1 if the run errored, 2 if any CONFIRMED finding is at or
+    above the --fail-on severity, else 0. Only confirmed findings gate a build —
+    needs-review findings never break CI (the whole point of proven-only)."""
+    from vaptbench.models import Run, Finding
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    with app.app_context():
+        run = Run.query.get(rid)
+        if not run or run.status == "error":
+            print(_c("31", "\n  CI: run errored → exit 1"))
+            return 1
+        if fail_on == "none":
+            print(_c("90", "\n  CI: --fail-on none → exit 0"))
+            return 0
+        thresh = order[fail_on]
+        gating = [f for f in Finding.query.filter_by(run_id=rid, confidence="confirmed").all()
+                  if order.get(f.severity, 4) <= thresh]
+        if gating:
+            worst = min(gating, key=lambda f: order.get(f.severity, 4))
+            print(_c("31", f"\n  CI GATE FAILED → exit 2 — {len(gating)} confirmed finding(s) "
+                           f"≥ {fail_on} (worst: {worst.severity.upper()} {worst.title})"))
+            return 2
+        print(_c("32", f"\n  CI GATE PASSED → exit 0 — no confirmed finding ≥ {fail_on}"))
+        return 0
 
 
 def _follow(app, rid):

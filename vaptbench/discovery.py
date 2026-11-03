@@ -261,6 +261,107 @@ def ingest_openapi(base_url, send, scope, log):
     return set(), [], [], None
 
 
+# --------------------------------------------------------------- Postman
+_VAR_RE = re.compile(r"\{\{([^}]+)\}\}")
+
+
+def _subst_vars(s, variables):
+    """Replace {{var}} tokens from a Postman variable map; leave unknown ones."""
+    if not isinstance(s, str):
+        return s
+    return _VAR_RE.sub(lambda m: str(variables.get(m.group(1).strip(), m.group(0))), s)
+
+
+def _collect_vars(coll):
+    """Collection-level + environment variables -> {name: value}."""
+    out = {}
+    for v in (coll.get("variable") or []):
+        if isinstance(v, dict) and v.get("key"):
+            out[v["key"]] = v.get("value", "")
+    return out
+
+
+def _pm_url(url, variables, base_url):
+    """Resolve a Postman request URL (string or object) to an absolute URL."""
+    if isinstance(url, dict):
+        raw = url.get("raw")
+        if not raw:
+            host = url.get("host")
+            host = ".".join(host) if isinstance(host, list) else (host or "")
+            path = url.get("path")
+            path = "/".join(str(p) for p in path) if isinstance(path, list) else (path or "")
+            raw = f"{host}/{path}"
+    else:
+        raw = url
+    raw = _subst_vars(raw or "", variables)
+    if not raw:
+        return ""
+    if not raw.startswith("http"):
+        raw = urljoin(base_url, raw)
+    return raw.split("#")[0] if raw.startswith("http") else ""
+
+
+def _pm_body_op(method, url, body, variables):
+    """A JSON request body -> a body_op for the JSON fuzzer (string fields only)."""
+    if not isinstance(body, dict) or body.get("mode") != "raw":
+        return None
+    raw = _subst_vars(body.get("raw") or "", variables)
+    try:
+        doc = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(doc, dict) or not doc:
+        return None
+    fields = [k for k, v in doc.items() if isinstance(v, str)]
+    if not fields:
+        return None
+    return {"method": method.upper(), "url": url, "content_type": "application/json",
+            "body": doc, "fields": fields}
+
+
+def ingest_postman(path, base_url, scope, log):
+    """Parse a Postman v2.x collection file into (urls, post_methods, body_ops).
+    Clients often hand over a Postman export instead of an OpenAPI spec; this
+    turns it into the same testable surface. Scope-checked; JSON request bodies
+    feed the JSON-body fuzzer."""
+    try:
+        with open(path) as f:
+            coll = json.load(f)
+    except Exception as e:
+        log("warn", "discover", f"postman: cannot read {path}: {e}")
+        return set(), [], []
+    variables = _collect_vars(coll)
+    urls, post_methods, body_ops = set(), [], []
+
+    def walk(items):
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            if isinstance(it.get("item"), list):      # folder -> recurse
+                walk(it["item"])
+                continue
+            req = it.get("request")
+            if not isinstance(req, dict):
+                continue
+            method = (req.get("method") or "GET").upper()
+            full = _pm_url(req.get("url"), variables, base_url)
+            if not full or not _in(full, scope):
+                continue
+            urls.add(full)
+            if method != "GET":
+                post_methods.append((method, full))
+                bop = _pm_body_op(method, full, req.get("body"), variables)
+                if bop:
+                    body_ops.append(bop)
+
+    walk(coll.get("item"))
+    if urls:
+        extra = f", {len(body_ops)} with JSON body" if body_ops else ""
+        log("hit", "discover",
+            f"Postman collection: +{len(urls)} request(s){extra}")
+    return urls, post_methods, body_ops
+
+
 # --------------------------------------------------------------- GraphQL
 _GQL_PATHS = ["graphql", "api/graphql", "graphql/v1", "v1/graphql", "query", "gql"]
 _GQL_INTROSPECT = json.dumps(
@@ -364,6 +465,16 @@ def expand_surface(base_url, send, scope, endpoints, log, param_mining=True):
                 notes.append(note)
         except Exception as e:
             log("warn", "discover", f"graphql ingest error: {e}")
+
+        pm_path = os.environ.get("VAPT_POSTMAN", "")
+        if pm_path and os.path.isfile(pm_path):
+            try:
+                u, pm, bops = ingest_postman(pm_path, base_url, scope, log)
+                new_urls |= u
+                post_methods += pm
+                body_ops += bops
+            except Exception as e:
+                log("warn", "discover", f"postman ingest error: {e}")
 
     if param_mining:
         try:

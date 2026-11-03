@@ -1,0 +1,32 @@
+# Autonomous VAPT gate for CI — fails the build on any CONFIRMED finding.
+# Only proven findings gate the build; needs-review findings never break CI.
+name: VAPTBench security gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  vapt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e .
+      - name: Run VAPT gate
+        env:
+          # no Ollama in CI → engine runs its deterministic verifiers (fast, no LLM)
+          VAPT_AGENT: "0"
+        run: |
+          python vapt.py "${{ vars.VAPT_TARGET }}" \
+            --ci --fail-on high \
+            --report vapt-report.md
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vapt-report
+          path: vapt-report.md

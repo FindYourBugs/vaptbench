@@ -231,6 +231,31 @@ Classes & signals:
 Toggle with `VAPT_BYPASS=0`; `VAPT_BYPASS_TIMING=0` drops the slow cmd-timing
 variants; `VAPT_BYPASS_MAX` caps endpoints (default 10).
 
+## File-upload bypass (Phase 3f)
+Discovered multipart upload forms are tested with extension / content-type /
+magic-byte / double-extension / null-byte / trailing-dot bypass variations
+(`upload.py`). A benign proof file (echoes a unique marker, runs nothing) is
+uploaded, the stored file located (response path + common upload dirs) and
+fetched: if the server **executes** it → RCE via unrestricted upload (critical);
+if it is stored but inert → dangerous/unrestricted upload (medium). Toggle with
+`VAPT_UPLOAD=0`.
+
+## Hybrid web + infrastructure (Phase 4a)
+A web app runs on a host that usually exposes more than `:443`. In web mode the
+engine now **port-scans the target host** and runs the network service verifiers
+(SSH weak-algo, DB default-creds, RDP/NLA, TLS, SMB, LDAP, …) on whatever else is
+open, folding those findings into the same report. Toggle with `VAPT_WEB_INFRA=0`;
+`VAPT_WEB_INFRA_PORTS` sets the nmap ports spec (default `top1000`).
+
+## CVE / version coverage (Phase 4b)
+- **Technology/version fingerprint** — discloses software + versions from response
+  headers (`Server`, `X-Powered-By`, …) as an information-disclosure finding and
+  CVE-triage input.
+- **nuclei CVE/tech/exposure/misconfig templates** now run on the **web** target
+  (previously network-only). CVE template hits are tagged as **Known Vulnerability
+  (CVE)**; info-level detections are logged to the feed but kept out of the report
+  so real findings aren't buried. Toggle with `VAPT_WEB_NUCLEI=0`.
+
 ## Autonomous engine (Start VAPT)
 Click **Start VAPT** on a target and the engine runs the whole web VAPT in the
 background — authenticate every role → recon/map → test & verify → access

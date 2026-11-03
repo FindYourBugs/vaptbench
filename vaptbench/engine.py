@@ -12,6 +12,9 @@ import os
 import re
 import time
 import uuid
+import json
+import shutil
+import subprocess
 import threading
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
@@ -33,6 +36,9 @@ from . import discovery as discovery_mod
 from . import exploit as exploit_mod
 from . import bypass as bypass_mod
 from . import upload as upload_mod
+from . import netscan
+from . import net_verifiers as NV
+from .scope import in_scope
 from .skills import load_playbook
 
 SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch API surface
@@ -46,6 +52,9 @@ BYPASS_MODE = os.environ.get("VAPT_BYPASS", "1") != "0"   # filter/WAF bypass pa
 BYPASS_TIMING = os.environ.get("VAPT_BYPASS_TIMING", "1") != "0"  # include slow cmd-timing variants
 MAX_BYPASS_ENDPOINTS = int(os.environ.get("VAPT_BYPASS_MAX", "10"))
 UPLOAD_MODE = os.environ.get("VAPT_UPLOAD", "1") != "0"   # file-upload bypass tester
+WEB_INFRA = os.environ.get("VAPT_WEB_INFRA", "1") != "0"  # hybrid: port-scan the web host too
+WEB_INFRA_PORTS = os.environ.get("VAPT_WEB_INFRA_PORTS", "top1000")
+WEB_NUCLEI = os.environ.get("VAPT_WEB_NUCLEI", "1") != "0" and shutil.which("nuclei")  # CVE/tech templates
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -427,7 +436,15 @@ def _run(app, run_id):
                 _log(run, "info", "access", "Replaying endpoints across roles (access control)...")
                 _access_control(run, send, endpoints, identities, seen)
 
-            # --- Phase 4b: exploitation depth (read-only proof) ------------
+            # --- Phase 4a: hybrid infra sweep (port scan + service verifiers)
+            if WEB_INFRA and not run.stop_requested:
+                _infra_phase(run, t, scope, seen)
+
+            # --- Phase 4b: CVE / version + nuclei templates on the web target
+            if not run.stop_requested:
+                _cve_phase(run, send, t, scope, seen, base)
+
+            # --- Phase 4c: exploitation depth (read-only proof) ------------
             if EXPLOIT_MODE and not run.stop_requested:
                 _exploit_phase(run, send, seen)
 
@@ -615,6 +632,125 @@ def _upload_phase(run, send, upload_forms, seen, primary):
         except Exception as e:
             _log(run, "warn", "upload", f"upload test error on {form['action']}: {e}")
         db.session.commit()
+
+
+def _infra_phase(run, t, scope, seen):
+    """Hybrid web+infra: a web app runs on a host that usually exposes more than
+    :443. Port-scan the target host and run the network service verifiers, folding
+    the results into the same run/report (SSH/DB/RDP/TLS/etc. on other ports)."""
+    host = urlparse(t.base_url).hostname
+    if not host:
+        return
+    ok, _why = in_scope(t.base_url, scope)
+    if not ok:
+        return
+    _log(run, "info", "infra",
+         f"Infra sweep: port-scanning {host} (ports: {WEB_INFRA_PORTS}) + service verifiers...")
+    try:
+        result = netscan.scan_host(host, ports=WEB_INFRA_PORTS,
+                                   log=lambda m: _log(run, "info", "infra", m))
+    except Exception as e:
+        _log(run, "warn", "infra", f"scan error: {e}")
+        return
+    services = [s for s in result.get("services", []) if in_scope(host, scope)[0]]
+    if not services:
+        _log(run, "info", "infra", "no additional open services found")
+        return
+    portlist = ", ".join(f"{s['port']}/{s['proto']} {s['name']}"
+                         + (f" ({s['product']} {s['version']})".rstrip() if s.get('product') else "")
+                         for s in sorted(services, key=lambda x: x["port"]))
+    _log(run, "info", "infra", f"{host}: {portlist}")
+    _add_finding(run, seen, dict(
+        title=f"Open network services on {host}",
+        vuln_class="net-service", severity="info", confidence="confirmed",
+        description=f"The web host {host} exposes {len(services)} network service(s) beyond the "
+                    f"application itself:\n{portlist}",
+        steps=f"nmap -sV {host}", poc_request=f"nmap -sV {host}", poc_response=portlist))
+    for svc in services:
+        if run.stop_requested:
+            break
+        for label, fn in NV.verifiers_for(svc):
+            try:
+                for f in fn(host):
+                    _add_finding(run, seen, f)
+            except Exception as e:
+                _log(run, "warn", "infra", f"{label} on {host}:{svc['port']}: {e}")
+        db.session.commit()
+
+
+_TECH_HDRS = ["Server", "X-Powered-By", "X-AspNet-Version", "X-AspNetMvc-Version",
+              "X-Generator", "X-Drupal-Dynamic-Cache", "X-Runtime", "Via", "X-Backend-Server"]
+
+
+def _tech_fingerprint(run, seen, base):
+    """Record disclosed technology/version from response headers (fuels CVE triage
+    and is itself an information-disclosure finding clients expect to see)."""
+    hdrs = base.get("headers") or {}
+    found = {h: hdrs[h] for h in _TECH_HDRS if h in hdrs and hdrs[h]}
+    # only emit when a version number is actually disclosed
+    versiony = {k: v for k, v in found.items() if re.search(r"\d+\.\d+", v)}
+    if not versiony:
+        return
+    lines = "\n".join(f"{k}: {v}" for k, v in versiony.items())
+    _add_finding(run, seen, dict(
+        title="Technology / version disclosure in HTTP headers",
+        vuln_class="tech-disclosure", severity="low", confidence="confirmed",
+        cvss="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        description=f"The server discloses software and version details in its response headers, "
+                    f"narrowing an attacker's search for known CVEs:\n{lines}\nSuppress these headers "
+                    f"and keep the disclosed components patched.",
+        steps="curl -sI " + (base.get("url") or "the target"),
+        poc_request="HEAD / (response headers)", poc_response=lines))
+
+
+def _cve_phase(run, send, t, scope, seen, base):
+    """Version/CVE coverage on the web target: a technology/version fingerprint
+    finding, plus nuclei CVE/tech/exposure/misconfig templates (severity-bearing
+    only — info-level detections are logged, not reported, to avoid noise)."""
+    try:
+        _tech_fingerprint(run, seen, base)
+    except Exception as e:
+        _log(run, "warn", "cve", f"fingerprint error: {e}")
+    if not WEB_NUCLEI:
+        return
+    ok, _why = in_scope(t.base_url, scope)
+    if not ok:
+        return
+    _log(run, "info", "cve", "nuclei CVE / tech / exposure / misconfiguration templates...")
+    cmd = ["nuclei", "-u", t.base_url, "-jsonl", "-silent",
+           "-tags", "cve,tech,exposure,misconfig,default-login",
+           "-severity", "low,medium,high,critical",
+           "-timeout", "6", "-rl", "80", "-no-interactsh"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except Exception as e:
+        _log(run, "warn", "cve", f"nuclei error: {e}")
+        return
+    added = 0
+    for line in (out.stdout or "").splitlines():
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        info = j.get("info", {})
+        sev = (info.get("severity") or "info").lower()
+        name = info.get("name", j.get("template-id", "nuclei finding"))
+        if sev not in ("low", "medium", "high", "critical"):
+            _log(run, "info", "cve", f"[detection] {name} @ {j.get('matched-at', '')}")
+            continue
+        tid = j.get("template-id", "")
+        is_cve = tid.lower().startswith("cve-") or "cve" in (info.get("tags") or "")
+        _add_finding(run, seen, dict(
+            title=f"{name}" + (f" [{tid.upper()}]" if is_cve else ""),
+            vuln_class="web-cve" if is_cve else "web-nuclei",
+            severity=sev, confidence="confirmed",
+            description=(info.get("description") or name).strip()
+                        + (f"\n\nReference: {', '.join(info.get('reference') or [])}" if info.get("reference") else ""),
+            cvss="", steps=f"nuclei -id {tid} -u {j.get('matched-at', t.base_url)}",
+            poc_request=j.get("matched-at", t.base_url),
+            poc_response=(json.dumps(j.get("extracted-results", []))[:400]) or tid))
+        added += 1
+    _log(run, "info", "cve", f"nuclei: {added} severity-bearing finding(s) added")
 
 
 def _deterministic_sweep(run, send, t, endpoints, identities, seen, primary=None):

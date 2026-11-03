@@ -43,6 +43,9 @@ CLASS_MAP = {
     "hunt-misc":       ("CWE-693",  "A05:2021 – Security Misconfiguration", "Security Misconfiguration"),
     "api-doc-exposure": ("CWE-200", "A05:2021 – Security Misconfiguration", "Information Disclosure"),
     "graphql-introspection": ("CWE-200", "A05:2021 – Security Misconfiguration", "Information Disclosure"),
+    "tech-disclosure":  ("CWE-200", "A05:2021 – Security Misconfiguration", "Information Disclosure"),
+    "web-cve":          ("CWE-1395", "A06:2021 – Vulnerable & Outdated Components", "Known Vulnerability (CVE)"),
+    "web-nuclei":       ("-",        "A05:2021 – Security Misconfiguration", "Templated Finding"),
     "chain":           ("-",        "-",                                    "Attack Chain"),
     # network / infrastructure classes
     "net-service":     ("-",        "-",                                    "Network Exposure"),

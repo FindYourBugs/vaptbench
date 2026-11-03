@@ -37,6 +37,7 @@ SPA_CRAWL = os.environ.get("VAPT_SPA_CRAWL", "1") != "0"  # discover XHR/fetch A
 AGENT_MODE = os.environ.get("VAPT_AGENT", "1") != "0"   # LLM-driven when model is up
 CRITIC_MODE = os.environ.get("VAPT_CRITIC", "1") != "0"  # skeptical review of findings
 EXPLOIT_MODE = os.environ.get("VAPT_EXPLOIT", "1") != "0"  # extract read-only proof from confirmed findings
+EXPLOIT_MARKER = "\n\n--- Exploitation (read-only proof) ---\n"  # shared by exploit + writeup + report
 MAX_INJECT_ENDPOINTS = 15   # timing checks are request-heavy; cap them
 MAX_ADV_ENDPOINTS = 8       # SSRF/stored are O(n^2)-ish; cap tighter
 OOB_HOST = os.environ.get("VAPT_OOB_HOST", "127.0.0.1:8090")
@@ -647,7 +648,7 @@ def _exploit_phase(run, send, seen):
         if not res:
             continue
         summary, poc_req, poc_resp = res
-        fn.description = (fn.description or "") + "\n\n--- Exploitation (read-only proof) ---\n" + summary
+        fn.description = (fn.description or "") + EXPLOIT_MARKER + summary
         # keep the detection PoC, add the exploitation PoC as the headline evidence
         fn.poc_request = poc_req or fn.poc_request
         if poc_resp:
@@ -666,12 +667,18 @@ def _writeup_phase(run):
         if fn.vuln_class not in cache:
             pb = load_playbook(fn.vuln_class)
             cache[fn.vuln_class] = pb["body"] if pb else ""
+        # Preserve the deterministic exploitation-proof block verbatim: strip it
+        # before the AI rewrite, re-append it after, so the write-up can't drop it.
+        desc, exploit_block = fn.description or "", ""
+        if EXPLOIT_MARKER in desc:
+            desc, tail = desc.split(EXPLOIT_MARKER, 1)
+            exploit_block = EXPLOIT_MARKER + tail
         upd = ai_tester.writeup({
             "title": fn.title, "vuln_class": fn.vuln_class, "severity": fn.severity,
-            "description": fn.description, "poc_response": fn.poc_response,
+            "description": desc, "poc_response": fn.poc_response,
         }, cache[fn.vuln_class])
         if upd.get("description"):
-            fn.description = upd["description"]
+            fn.description = upd["description"] + exploit_block
             db.session.commit()
 
 

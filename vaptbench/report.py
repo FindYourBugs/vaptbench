@@ -116,15 +116,20 @@ def _catbar(findings):
 
 
 def _sections_from_desc(desc):
-    """Split a stored description into (body, remediation, analyst_review).
-    Handles the AI write-up labels (DESCRIPTION/IMPACT/REMEDIATION, incl. typos)
-    and the appended '--- Analyst review ---' critic block."""
+    """Split a stored description into (body, remediation, analyst_review, exploitation).
+    Handles the AI write-up labels (DESCRIPTION/IMPACT/REMEDIATION, incl. typos),
+    the appended '--- Exploitation (read-only proof) ---' extraction block, and the
+    '--- Analyst review ---' critic block. Order matters: review is last in the
+    string, exploitation precedes it, remediation lives inside the AI body."""
     desc = desc or ""
-    review = ""
+    review = exploitation = ""
     if "--- Analyst review" in desc:
         desc, review = desc.split("--- Analyst review", 1)
         review = review.split("---", 1)[-1].strip() if review.startswith(" ") else review
         review = review.lstrip(" (AIcrit,advisory)-\n")
+    if "--- Exploitation (read-only proof) ---" in desc:
+        desc, exploitation = desc.split("--- Exploitation (read-only proof) ---", 1)
+        exploitation = exploitation.strip()
     # strip the "--- AI write-up ---" marker if present
     desc = desc.replace("--- AI write-up ---", "").strip()
     remediation = ""
@@ -135,7 +140,7 @@ def _sections_from_desc(desc):
             remediation = desc[i + len(key):].strip()
             desc = desc[:i].strip()
             break
-    return desc, remediation, review.strip()
+    return desc, remediation, review.strip(), exploitation.strip()
 
 
 def _finding_html(i, f):
@@ -147,7 +152,7 @@ def _finding_html(i, f):
     param = ""
     if "via '" in (f.title or ""):
         param = f.title.split("via '", 1)[1].split("'")[0]
-    body, remediation, review = _sections_from_desc(f.description)
+    body, remediation, review, exploitation = _sections_from_desc(f.description)
     conf = "Confirmed (verifier-proven)" if f.confidence == "confirmed" else "Needs review (flagged)"
     parts = [
         f'<div class="finding">',
@@ -175,6 +180,9 @@ def _finding_html(i, f):
         parts.append(f'<h4>Request</h4><pre>{_e(f.poc_request)}</pre>')
     if f.poc_response:
         parts.append(f'<h4>Response (evidence)</h4><pre>{_e(f.poc_response[:2000])}</pre>')
+    if exploitation:
+        parts.append(f'<div class="exploit"><b>Exploitation (read-only proof)</b><br>'
+                     f'{_e(exploitation).replace(chr(10), "<br>")}</div>')
     if remediation:
         parts.append(f'<h4>Remediation</h4><p>{_e(remediation).replace(chr(10), "<br>")}</p>')
     if review:
@@ -327,6 +335,8 @@ pre {{ background:#f6f8fa; border:1px solid #e1e6ec; border-radius:4px; padding:
       word-break:break-word; overflow-wrap:anywhere; }}
 .review {{ background:#fff8e6; border-left:3px solid #d9a300; padding:9px 12px;
       font-size:10.5px; margin:8px 0; }}
+.exploit {{ background:#fdecec; border-left:3px solid #c0392b; padding:9px 12px;
+      font-size:10.5px; margin:8px 0; font-family:ui-monospace,Menlo,Consolas,monospace; }}
 .section {{ page-break-before:always; }}
 p {{ margin:6px 0; }}
 </style></head><body>

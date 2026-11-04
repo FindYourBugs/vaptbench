@@ -25,8 +25,13 @@ def _apply_identity(sess, identity):
         sess.headers["Authorization"] = f"Bearer {identity.secret}"
 
 
-def send(method, url, scope_rules, headers=None, body=None, identity=None, timeout=20):
-    """Send one request. Returns dict with ok/blocked/status/len/text."""
+def send(method, url, scope_rules, headers=None, body=None, identity=None, timeout=20,
+         max_text=20000):
+    """Send one request. Returns dict with ok/blocked/status/len/text.
+
+    `text` is capped at `max_text` chars to keep memory/DB sane; callers that
+    must parse a whole document (e.g. harvesting API routes from a large JS
+    bundle) pass a larger `max_text`. `len` is always the full body length."""
     ok, why = in_scope(url, scope_rules)
     if not ok:
         return {"ok": False, "blocked": True, "reason": why}
@@ -53,7 +58,7 @@ def send(method, url, scope_rules, headers=None, body=None, identity=None, timeo
         "status": resp.status_code,
         "len": len(text),
         "headers": dict(resp.headers),
-        "text": text[:20000],
+        "text": text[:max_text],
         "elapsed": resp.elapsed.total_seconds(),   # for timing-based checks
         "identity": identity.role if identity else "(none)",
     }

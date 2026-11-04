@@ -15,6 +15,7 @@ Loop:
 Engine builds a Ctx and calls run_agent(ctx). Each decision is streamed to the
 live run feed so the operator sees the agent reasoning.
 """
+import difflib
 import os
 from urllib.parse import urlparse
 
@@ -93,6 +94,7 @@ def run_agent(ctx):
     ctx.log("info", "agent", f"Agent mode: {ai_mod._cfg()['ollama_model']} planning up to {budget} steps")
     history = []
     bad_streak = 0
+    waste_streak = 0
 
     for step in range(1, budget + 1):
         if getattr(ctx.run, "stop_requested", False):
@@ -120,6 +122,30 @@ def run_agent(ctx):
         if action == "finish":
             ctx.log("info", "agent", f"step {step}: finish — {decision.get('reason','(done)')}")
             break
+
+        # Repair a model-mangled host (a typo like viamo→viami) by snapping it to
+        # the nearest known endpoint, and refuse to burn the budget re-poking a
+        # host that is not a known in-scope endpoint — the model loops on these.
+        url = decision.get("url", "")
+        if action in ("probe", "crawl", "test", "inject", "advanced", "access_control"):
+            fixed = _repair_url(ctx, url)
+            if fixed != url:
+                ctx.log("info", "agent", f"step {step}: corrected url host -> {fixed}")
+                url = fixed
+                decision["url"] = url
+            if url and not _in_scope_url(ctx, url):
+                waste_streak += 1
+                ctx.log("warn", "agent",
+                        f"step {step}: {action} {url} -> not a known in-scope endpoint; "
+                        f"choose one from the list")
+                history.append({"step": step, "action": action, "url": url,
+                                "result": "invalid: not a known in-scope endpoint"})
+                if waste_streak >= 6:
+                    ctx.log("warn", "agent",
+                            "agent stuck on out-of-scope URLs — handing to deterministic phases")
+                    break
+                continue
+        waste_streak = 0
 
         result = _dispatch(ctx, action, decision)
         ctx.log("test", "agent", f"step {step}: {action} {decision.get('url','')} -> {result}")
@@ -214,6 +240,33 @@ def _dispatch(ctx, action, d):
 def _in_scope_url(ctx, url):
     return bool(url) and url.startswith("http") and any(
         urlparse(url).hostname == urlparse(e).hostname for e in ctx.endpoints)
+
+
+def _known_hosts(ctx):
+    out = []
+    for e in ctx.endpoints:
+        h = urlparse(e).hostname
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def _repair_url(ctx, url):
+    """Snap a model-mangled host (e.g. the typo 'viamo' for 'viami') to the
+    nearest known in-scope endpoint host. Returns the corrected url, or the
+    original when the host is already known or nothing is close enough."""
+    if not url or not url.startswith("http"):
+        return url
+    host = urlparse(url).hostname or ""
+    hosts = _known_hosts(ctx)
+    if not host or host in hosts:
+        return url
+    match = difflib.get_close_matches(host, hosts, n=1, cutoff=0.8)
+    if match and match[0] != host:
+        pu = urlparse(url)
+        netloc = match[0] + (f":{pu.port}" if pu.port else "")
+        return pu._replace(netloc=netloc).geturl()
+    return url
 
 
 def _probe(ctx, url):

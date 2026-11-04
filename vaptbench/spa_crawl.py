@@ -228,7 +228,12 @@ def harvest_static(base_url, send, scope_rules, max_bundles=12, log=None):
     origins, app_paths, bases, segments = set(), set(), set(), set()
     corpus = [html]                       # the shell can carry paths/origins too
     for bu in bundles:
-        r = send("GET", bu)
+        # Minified bundles are large and the API routes sit deep inside them, so
+        # ask for the FULL body (the default send caps text at 20 KB).
+        try:
+            r = send("GET", bu, max_text=4_000_000)
+        except TypeError:
+            r = send("GET", bu)           # a send() that doesn't accept max_text
         if r.get("ok"):
             corpus.append(r.get("text") or "")
     for body in corpus:

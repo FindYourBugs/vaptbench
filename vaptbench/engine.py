@@ -372,8 +372,9 @@ def _run(app, run_id):
             scope = t.scope_rules
             seen = set()
 
-            def send(method, url, headers="", body="", identity=None):
-                r = http_send(method, url, scope, headers=headers, body=body, identity=identity)
+            def send(method, url, headers="", body="", identity=None, max_text=20000):
+                r = http_send(method, url, scope, headers=headers, body=body,
+                              identity=identity, max_text=max_text)
                 run.requests_sent = (run.requests_sent or 0) + 1
                 return r
 

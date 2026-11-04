@@ -244,11 +244,20 @@ def _body_op(spec, method, url, op):
             "body": body, "fields": fields}
 
 
-def ingest_openapi(base_url, send, scope, log):
+def ingest_openapi(base_url, send, scope, log, extra_bases=()):
     """Return (urls, post_methods, body_ops, note) from the first reachable
-    OpenAPI/Swagger doc. body_ops carry synthesised JSON bodies for fuzzing."""
-    for p in _OPENAPI_PATHS:
-        u = urljoin(base_url if base_url.endswith("/") else base_url + "/", p)
+    OpenAPI/Swagger doc. body_ops carry synthesised JSON bodies for fuzzing.
+
+    Probes the target AND any ``extra_bases`` (e.g. the SPA's backend API host,
+    where the spec usually lives), so a public /v3/api-docs on a sibling host is
+    ingested too — that single doc is often the whole attack surface."""
+    bases, seen_b = [], set()
+    for b in [base_url] + list(extra_bases or ()):
+        b = b if b.endswith("/") else b + "/"
+        if b not in seen_b:
+            seen_b.add(b); bases.append(b)
+    for root, p in [(b, p) for b in bases for p in _OPENAPI_PATHS]:
+        u = urljoin(root, p)
         if not _in(u, scope):
             continue
         r = send("GET", u)
@@ -257,7 +266,7 @@ def ingest_openapi(base_url, send, scope, log):
         spec = _load_spec(r["text"])
         if not spec or not isinstance(spec.get("paths"), dict):
             continue
-        sbase = _spec_base(spec, base_url)
+        sbase = _spec_base(spec, root)
         urls, post_methods, body_ops = set(), [], []
         for path, item in spec["paths"].items():
             if not isinstance(item, dict):
@@ -630,9 +639,20 @@ def expand_surface(base_url, send, scope, endpoints, log, param_mining=True):
     except Exception as e:
         log("warn", "discover", f"sitemap ingest error: {e}")
 
+    # Backend API hosts that discovery already pulled into the endpoint list
+    # (e.g. the SPA's api.* host) — probe them for an OpenAPI/Swagger doc too.
+    base_netloc = urlparse(base_url).netloc
+    extra_bases = []
+    for u in endpoints:
+        pu = urlparse(u)
+        if pu.scheme in ("http", "https") and pu.netloc and pu.netloc != base_netloc:
+            origin = f"{pu.scheme}://{pu.netloc}/"
+            if origin not in extra_bases and _in(origin, scope):
+                extra_bases.append(origin)
+
     if API_INGEST:
         try:
-            u, pm, bops, note = ingest_openapi(base_url, send, scope, log)
+            u, pm, bops, note = ingest_openapi(base_url, send, scope, log, extra_bases=extra_bases)
             new_urls |= u
             post_methods += pm
             body_ops += bops

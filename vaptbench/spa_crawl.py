@@ -69,6 +69,12 @@ def _is_api_url(url, scope_rules):
     return ok
 
 
+def _origin_of(u):
+    """scheme://netloc of a URL (its origin), no path."""
+    pu = urlparse(u)
+    return f"{pu.scheme}://{pu.netloc}"
+
+
 def capture(base_url, scope_rules, identity=None, max_urls=80, log=None):
     """Runtime capture: load the SPA and record its real XHR/fetch calls.
 
@@ -193,8 +199,9 @@ def harvest_static(base_url, send, scope_rules, max_bundles=12, log=None):
     if not base.get("ok"):
         return []
     html = base.get("text") or ""
-    host = urlparse(base_url).hostname or ""
-    reg_host = re.escape(".".join(host.split(".")[-2:])) if host else r"[a-z0-9.-]+"
+    host = (urlparse(base_url).hostname or "").lower()
+    reg = ".".join(host.split(".")[-2:]) if host else ""
+    reg_host = re.escape(reg) if reg else r"[a-z0-9.-]+"
 
     # Collect bundle URLs (CRA /static/js, Next /_next/static, generic .js).
     bundles = []
@@ -205,46 +212,65 @@ def harvest_static(base_url, send, scope_rules, max_bundles=12, log=None):
             bundles.append(u)
     bundles = bundles[:max_bundles]
 
-    host_re = re.compile(r"https://[a-z0-9.-]*(?:api|console|backend|service|gateway)"
-                         r"[a-z0-9.-]*\." + reg_host + r"[a-z0-9/_.-]*", re.I)
-    base_path_re = re.compile(r"/api/v[0-9]+/[a-z0-9/_-]+", re.I)
+    # Any absolute origin on the SAME registrable domain is a candidate backend
+    # (api./backend./console. … or a sibling host). An SPA's real attack surface
+    # lives on these, so we must notice them even when they are not yet in scope.
+    origin_re = re.compile(r"https?://([a-z0-9][a-z0-9.-]*\.%s)\b" % reg_host, re.I)
+    # Quoted absolute API/app paths, e.g. "/api/...", "/login/api/user/2fa/...".
+    path_re = re.compile(
+        r"""["'`](/(?:api|login|logout|auth|oauth2|admin|backoffice|super-admin|"""
+        r"""internal|account|users?|v[0-9]|graphql|register|webhook|billing|report|"""
+        r"""export|upload|file|document|dashboard|settings?|compliance|device|"""
+        r"""policy|signature|profile|token|otp|2fa|reset)[a-z0-9/_.:{}$-]*)["'`]""", re.I)
     versioned_re = re.compile(r"/api/v[0-9]+/?", re.I)
     literal_re = re.compile(r'"(/?[a-z0-9_-]+(?:/[a-z0-9_{}:.-]+){1,5})"', re.I)
 
-    api_hosts, full_paths, bases, segments = set(), set(), set(), set()
+    origins, app_paths, bases, segments = set(), set(), set(), set()
+    corpus = [html]                       # the shell can carry paths/origins too
     for bu in bundles:
         r = send("GET", bu)
-        if not r.get("ok"):
-            continue
-        body = r.get("text") or ""
-        for h in host_re.findall(body):
-            api_hosts.add(h.rstrip("/"))
-        for p in base_path_re.findall(body):
-            full_paths.add(p)
+        if r.get("ok"):
+            corpus.append(r.get("text") or "")
+    for body in corpus:
+        for h in origin_re.findall(body):
+            origins.add(h.rstrip("/").lower())
+        for p in path_re.findall(body):
+            app_paths.add(p.split("#")[0])
         for b in versioned_re.findall(body):
             bases.add(b.rstrip("/"))
         for seg in literal_re.findall(body):
             if ROUTE_WORDS.search(seg) and 3 <= len(seg) <= 80 and " " not in seg:
                 seg = "/" + seg.lstrip("/")
-                if versioned_re.match(seg):
-                    full_paths.add(seg)      # already versioned = a full path
-                else:
-                    segments.add(seg)
+                (app_paths if versioned_re.match(seg) else segments).add(seg)
 
-    candidates = set()
-    # 1) Full API hosts seen verbatim.
-    candidates |= api_hosts
-    # 2) Full /api/vN/... paths on the base host.
-    for p in full_paths:
-        candidates.add(urljoin(base_url, p))
-    # 3) Version-less resource segments: prefix each known /api/vN base, or (if
-    #    none seen) try them on the base host directly.
-    for seg in list(segments)[:60]:
+    # Backend hosts we found but can't legally touch yet — say so, loudly, with the
+    # exact --scope to add, instead of a silent empty crawl.
+    ext_hosts = sorted(h for h in origins
+                       if h != host and not in_scope(f"https://{h}/", scope_rules)[0])
+    if ext_hosts:
+        _l("backend host(s) referenced but OUT OF SCOPE — the app's real API lives here; "
+           "re-run with --scope " + " --scope ".join(ext_hosts) + " to test it")
+
+    # Hosts we may build candidates on: the base, plus any in-scope sibling/API host.
+    api_origins = [f"https://{h}" for h in sorted(origins)
+                   if in_scope(f"https://{h}/", scope_rules)[0]]
+    roots = [_origin_of(base_url)] + api_origins
+
+    # Resolve version-less resource segments against any seen /api/vN base.
+    paths = set(app_paths)
+    for seg in list(segments)[:80]:
         if bases:
             for b in bases:
-                candidates.add(urljoin(base_url, b + seg))
+                paths.add("/" + (b.strip("/") + seg))
         else:
-            candidates.add(urljoin(base_url, seg))
+            paths.add(seg)
+
+    candidates = set(api_origins)                  # the bare origins, worth probing
+    for p in paths:
+        if not p.startswith("/"):
+            p = "/" + p
+        for root in roots:
+            candidates.add(root + p)
 
     out, seen = [], set()
     for u in candidates:
@@ -253,7 +279,8 @@ def harvest_static(base_url, send, scope_rules, max_bundles=12, log=None):
             continue
         seen.add(u)
         out.append({"method": "GET", "url": u, "has_body": False})
-    _l(f"static bundle harvest: {len(bundles)} bundle(s) -> {len(out)} candidate API route(s)")
+    _l(f"static bundle harvest: {len(bundles)} bundle(s), {len(origins)} host(s) -> "
+       f"{len(out)} candidate API route(s)")
     return out
 
 

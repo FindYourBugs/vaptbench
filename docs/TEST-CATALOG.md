@@ -32,6 +32,20 @@ on a wall it must not fake (OTP, hardware WebAuthn, device-trust, CAPTCHA) — p
 the user to capture a session manually and pass `--auth bearer/cookie`. Toggle with
 `VAPT_AI_LOGIN` / `VAPT_AI_LOGIN_STEPS`.
 
+## Discovery (reach the surface before testing it)
+The verifiers can only find bugs on surface the engine reaches. Discovery now:
+- **Detects the SPA's backend API host(s)** from the JS bundle + shell (any origin on
+  the same registrable domain) and, when one is **out of scope**, says so loudly with the
+  exact `--scope` to add — instead of a silent empty crawl.
+- **Attaches harvested routes to the API host**, not just the base host, and mines paths
+  for `/api`, `/login`, `/admin`, `/backoffice`, `/internal`, `/v3`, `2fa`, `oauth2`, …
+- **Ingests OpenAPI/Swagger from discovered API hosts** (`extra_bases`), not only the
+  target — a public `/v3/api-docs` on `api.*` is often the whole attack surface.
+- The **agent mission is attacker-minded and mapping-first**: map every page/param/route/
+  API, follow leads (ids, tenants, admin routes), retry failed attacks a different way, and
+  never `finish` while in-scope surface or a referenced backend host is unexplored. It still
+  never asserts a bug — unproven-but-suspicious is `needs-review`, never fabricated.
+
 ## Vulnerability coverage
 | Vulnerability | Engine | Status | Note |
 |---|---|---|---|

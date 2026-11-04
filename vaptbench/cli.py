@@ -242,6 +242,17 @@ def main(argv=None):
                          "a range/list like 1-65535 or 22,80,8443")
     ap.add_argument("--no-agent", action="store_true",
                     help="disable the LLM agent; run the deterministic sweep only")
+    ap.add_argument("--model", default="", metavar="NAME",
+                    help="base local model (Ollama), e.g. qwen3:14b (default) or a bigger one")
+    ap.add_argument("--agent-model", default="", metavar="NAME",
+                    help="model for the attacker-brain agent loop (reasoning-heavy); defaults "
+                         "to --model. Point this at a capable model, e.g. qwen3:32b or a cloud model")
+    ap.add_argument("--ai-backend", default="", choices=["", "local", "cloud"],
+                    help="local (Ollama, default) or cloud (needs --cloud-key)")
+    ap.add_argument("--cloud-key", default="", metavar="KEY",
+                    help="API key for --ai-backend cloud (else env VAPT_CLOUD_KEY)")
+    ap.add_argument("--cloud-model", default="", metavar="NAME",
+                    help="cloud model id (default claude-opus-4-8)")
     ap.add_argument("--postman", default="", metavar="PATH",
                     help="Postman collection (v2.x JSON) to ingest as API surface; can be "
                          "run alone (target/scope/token are derived from the file)")
@@ -317,6 +328,18 @@ def main(argv=None):
         os.environ["VAPT_NET_PORTS_SPEC"] = args.ports
     if args.no_agent:
         os.environ["VAPT_AGENT"] = "0"
+    # Model selection: the agent (attacker brain) can run on a more capable model
+    # than the verifiers' base model — point --agent-model at it.
+    if args.model:
+        os.environ["VAPT_OLLAMA_MODEL"] = args.model
+    if args.agent_model:
+        os.environ["VAPT_MODEL_REASONER"] = args.agent_model
+    if args.ai_backend:
+        os.environ["VAPT_AI_BACKEND"] = args.ai_backend
+    if args.cloud_key:
+        os.environ["VAPT_CLOUD_KEY"] = args.cloud_key
+    if args.cloud_model:
+        os.environ["VAPT_CLOUD_MODEL"] = args.cloud_model
     if args.db:
         os.environ["VAPT_DB"] = args.db
     elif "VAPT_DB" not in os.environ:
@@ -367,7 +390,13 @@ def main(argv=None):
         elif args.no_agent:
             mode = "deterministic (agent disabled)"
         elif ai_ok:
-            mode = f"AGENT · {ai_mod._cfg()['ollama_model']}"
+            c = ai_mod._cfg()
+            if c["backend"] == "cloud":
+                agent_model = c["cloud_model"]
+            else:
+                agent_model = ai_mod._model_for("reasoner", c)
+            base = c["ollama_model"]
+            mode = f"AGENT · {agent_model}" + (f" (verifiers: {base})" if agent_model != base else "")
         else:
             mode = f"deterministic (AI offline: {ai_why})"
 

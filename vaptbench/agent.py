@@ -16,7 +16,9 @@ Engine builds a Ctx and calls run_agent(ctx). Each decision is streamed to the
 live run feed so the operator sees the agent reasoning.
 """
 import difflib
+import json
 import os
+import re
 from urllib.parse import urlparse
 
 from . import verifiers as V
@@ -48,6 +50,11 @@ Available actions (choose exactly one per turn):
 - {"action":"inject","url":"<url>"}           run Tier-2 injection suite (ssti, lfi, nosqli, time-sqli, cmd)
 - {"action":"advanced","url":"<url>"}         SSRF (OOB-confirmed) + stored/DOM XSS
 - {"action":"access_control","url":"<url>"}   replay across all roles to find IDOR / broken authz
+- {"action":"request","method":"POST","url":"<url>","headers":{"K":"V"},"body":{...}|"raw","as":"anon|auth","expect":"what a response proves"}
+                                              craft and SEND one real request, then READ the response yourself —
+                                              use this to probe an API endpoint with the right method+body, to try a
+                                              sensitive function with NO session ("as":"anon"), or to retry a failed
+                                              attempt a different way. Non-destructive: DELETE is blocked by default.
 - {"action":"finish","reason":"<why>"}        stop — ONLY when in-scope surface is exhausted, not just "no bugs yet"
 When unsure, expand the surface (crawl/probe) rather than finish.
 Always include a short "thought" field explaining the choice."""
@@ -127,7 +134,7 @@ def run_agent(ctx):
         # the nearest known endpoint, and refuse to burn the budget re-poking a
         # host that is not a known in-scope endpoint — the model loops on these.
         url = decision.get("url", "")
-        if action in ("probe", "crawl", "test", "inject", "advanced", "access_control"):
+        if action in ("probe", "crawl", "test", "inject", "advanced", "access_control", "request"):
             fixed = _repair_url(ctx, url)
             if fixed != url:
                 ctx.log("info", "agent", f"step {step}: corrected url host -> {fixed}")
@@ -175,6 +182,13 @@ _SYSTEM = (
     "FOLLOW LEADS — an id, a tenant, an admin route one result exposes becomes the "
     "next action. If an attack fails, try a different endpoint, parameter or angle "
     "rather than repeating it.\n"
+    "USE YOUR HANDS — the 'request' action sends ONE real request you craft (method, "
+    "headers, body) and returns the actual response for you to read. Reach for it to "
+    "probe an API with the correct method and JSON body, to try a sensitive function "
+    "with NO session (\"as\":\"anon\") to check whether auth is enforced, to reuse an id "
+    "or token you saw, and to retry a failed attempt a different way. Read each "
+    "response and let it shape the next request — that is how you actually exploit, "
+    "not just scan. Stay non-destructive: prove a weakness, don't damage data.\n"
     "NEVER CLAIM A BUG YOURSELF — deterministic verifiers confirm findings. What you "
     "suspect but cannot prove is recorded for human review, never as confirmed, and "
     "you must not fabricate.\n"
@@ -232,6 +246,8 @@ def _dispatch(ctx, action, d):
             return _advanced(ctx, d.get("url", ""))
         if action == "access_control":
             return _access(ctx, d.get("url", ""))
+        if action == "request":
+            return _request(ctx, d)
     except Exception as e:
         return f"error: {e}"
     return "no-op"
@@ -379,6 +395,83 @@ def _advanced(ctx, url):
     for f in V3.check_dom_xss(ctx.send, url):
         ctx.add_finding(f); hits.append(f["vuln_class"])
     return "advanced -> " + (", ".join(sorted(set(hits))) if hits else "no findings")
+
+
+_SENS_PATH = re.compile(
+    r"(admin|backoffice|super-?admin|internal|report|audit|user|account|customer|"
+    r"compliance|setting|config|password|token|secret|2fa|mfa|otp|billing|invoice|"
+    r"policy|device|directory|tenant|dashboard|export|profile)", re.I)
+_SECRETISH = re.compile(
+    r'"?(?:password|secret|token|api[_-]?key|private[_-]?key|totp|mfa[_-]?secret|'
+    r'ssn|authenticator)"?\s*[:=]', re.I)
+_EMAIL = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.I)
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH"}
+
+
+def _request(ctx, d):
+    """Send ONE agent-crafted request and return a rich summary for the model to
+    reason on. Non-destructive by default. If an ANONYMOUS request to a sensitive
+    path returns substantial data with secret/PII markers, record a needs-review
+    finding — never a fabricated 'confirmed'; a human validates the exposure."""
+    url = _repair_url(ctx, d.get("url", ""))
+    if not _in_scope_url(ctx, url):
+        return "url not in scope / unknown"
+    method = str(d.get("method", "GET")).upper()
+    if method == "DELETE" and os.environ.get("VAPT_ALLOW_DESTRUCTIVE", "0") != "1":
+        return "DELETE blocked (safe mode); set VAPT_ALLOW_DESTRUCTIVE=1 to allow"
+    if method not in _SAFE_METHODS and method != "DELETE":
+        return f"unsupported method {method}"
+
+    raw_h = d.get("headers")
+    if isinstance(raw_h, dict):
+        hstr = "\n".join(f"{k}: {v}" for k, v in raw_h.items())
+    else:
+        hstr = str(raw_h or "")
+    raw_b = d.get("body")
+    if isinstance(raw_b, (dict, list)):
+        body = json.dumps(raw_b)
+        if "content-type" not in hstr.lower():
+            hstr = (hstr + "\nContent-Type: application/json").strip()
+    else:
+        body = str(raw_b or "")
+
+    # "as": anon (default for a missing-auth probe) | auth/session/<role>
+    as_role = str(d.get("as", "anon")).lower()
+    want_auth = as_role in ("auth", "session", "primary") or (
+        ctx.primary is not None and as_role == (ctx.primary.role or "").lower())
+    identity = ctx.primary if want_auth else None
+
+    r = ctx.send(method, url, headers=hstr, body=body, identity=identity)
+    if not r.get("ok"):
+        return f"blocked/failed: {r.get('reason')}"
+    status, blen, btext = r.get("status"), r.get("len") or 0, r.get("text") or ""
+    emails = len(set(_EMAIL.findall(btext)))
+    secretish = bool(_SECRETISH.search(btext))
+    path = urlparse(url).path
+    who = "authenticated" if identity else "anonymous"
+
+    # Conservative, deterministic needs-review signal for the agentic exploit loop:
+    # an ANONYMOUS request that got substantial data back from a sensitive path,
+    # carrying secret/PII markers, is a real lead a human must verify.
+    if (identity is None and status == 200 and blen >= 120
+            and _SENS_PATH.search(path) and (secretish or emails >= 2)):
+        marker = "secret/credential field" if secretish else f"{emails} email address(es)"
+        ctx.add_finding({
+            "title": f"Unauthenticated data/function exposure: {path}",
+            "vuln_class": "hunt-auth", "severity": "high", "confidence": "needs-review",
+            "cvss": "",
+            "description": (f"{method} {url} with NO session returned HTTP {status} and "
+                            f"{blen}B containing {marker}, on a sensitivity-suggesting path. "
+                            f"This endpoint may expose data/functions without authentication. "
+                            f"Needs human verification (is this data meant to be public?)."),
+            "steps": f"{method} {url} with no Cookie/Authorization header; inspect the response.",
+            "poc_request": f"{method} {url}  (no session)" + (f"\n\n{body}" if body else ""),
+            "poc_response": btext[:600],
+        })
+        return (f"{who} {method} -> {status} {blen}B | emails={emails} secretish={secretish} "
+                f"| ⚠ recorded needs-review (possible unauth exposure)")
+    return (f"{who} {method} -> {status} {blen}B | emails={emails} secretish={secretish} "
+            f"| snippet: {btext[:160].strip()!r}")
 
 
 def _access(ctx, url):

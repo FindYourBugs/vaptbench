@@ -402,6 +402,27 @@ def run_authz(send, endpoints, identities, log=None):
              if urlparse(u).path not in ("", "/") and not _PUBLIC.search(urlparse(u).path)]
     cands = cands[:_MAX_ENDPOINTS]
 
+    # SPA catch-all guard: a single-page app serves its index shell with HTTP 200
+    # for EVERY path (client-side routing), to everyone. That shell is NOT a
+    # protected resource — without this guard every /admin* path on the SPA host
+    # looks like "missing authentication" / "same content to all" (a false
+    # positive). Baseline one random, certainly-nonexistent path per host; any
+    # response equal to it is the shell and never counts as served/authorised.
+    shells = {}
+
+    def _shell_for(url):
+        pu = urlparse(url)
+        origin = f"{pu.scheme}://{pu.netloc}"
+        if origin not in shells:
+            probe = send("GET", f"{origin}/vapt-nonexistent-{uuid.uuid4().hex[:10]}")
+            shells[origin] = _body(probe) if (probe and probe.get("status") == 200
+                                              and _authorized(probe)) else ""
+        return shells[origin]
+
+    def _real(r, shell):
+        """Authorised, served content that is NOT just the SPA catch-all shell."""
+        return _authorized(r) and not (shell and _same_content(_body(r), shell))
+
     for url in cands:
         path = urlparse(url).path
         # access vector: each authed role + anonymous
@@ -410,9 +431,10 @@ def run_authz(send, endpoints, identities, log=None):
             resp[_role(ident)] = send("GET", url, identity=ident)
         anon = send("GET", url, identity=None)
 
-        authorized_roles = [r for r, rr in resp.items() if _authorized(rr)]
+        shell = _shell_for(url)
+        authorized_roles = [r for r, rr in resp.items() if _real(rr, shell)]
         denied_roles = [r for r, rr in resp.items() if _denied(rr)]
-        anon_ok = _authorized(anon)
+        anon_ok = _real(anon, shell)
         has_id = _has_object_id(url)
 
         # ---- (3/4) authentication -------------------------------------------

@@ -1343,6 +1343,29 @@ def _access_control(run, send, endpoints, identities, seen):
              "skipping access-control matrix (nothing to compare)")
         return
     primary = authed[0]
+    # SPA catch-all baseline per host: a single-page app serves its index shell
+    # with 200 for every path, so authed==unauth==shell would look like broken
+    # access control on every made-up path. Any response equal to the shell is
+    # not real content and is skipped.
+    import uuid as _uuid
+    shells = {}
+
+    def _shell(url):
+        pu = urlparse(url)
+        origin = f"{pu.scheme}://{pu.netloc}"
+        if origin not in shells:
+            pr = send("GET", f"{origin}/vapt-nonexistent-{_uuid.uuid4().hex[:10]}")
+            shells[origin] = (pr.get("text") or "") if (pr.get("ok") and pr.get("status") == 200) else ""
+        return shells[origin]
+
+    def _eq_shell(body, shell):
+        if not shell:
+            return False
+        if body.strip() == shell.strip():
+            return True
+        la, lb = len(body), len(shell)
+        return abs(la - lb) <= 16 and min(la, lb) / max(la, lb, 1) > 0.98
+
     for url in endpoints[:20]:
         if run.stop_requested:
             break
@@ -1358,6 +1381,9 @@ def _access_control(run, send, endpoints, identities, seen):
         ab, ub = a.get("text") or "", u.get("text") or ""
         if len(ab) < 200:
             continue
+        shell = _shell(url)
+        if _eq_shell(ub, shell) or _eq_shell(ab, shell):
+            continue                                 # SPA catch-all shell, not a protected resource
         if _looks_like_login(ub):
             continue                                 # unauth got the LOGIN page, not the content
         ratio = len(ub) / max(len(ab), 1)
